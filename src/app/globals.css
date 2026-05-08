@@ -34,6 +34,32 @@ a {
   color: inherit;
 }
 
+/* Round close (ImageViewer, camera modal) — shared chrome */
+.dp-preview-close-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 1001;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dp-preview-close-btn:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
 /* ── DockPass shell ─────────────────────────── */
 
 .dp-shell {
@@ -43,6 +69,11 @@ a {
   flex-direction: column;
 }
 
+/* Red background for the no-match failure screen */
+.dp-shell--fail {
+  background: #9e2d08;
+}
+
 .dp-nav {
   display: flex;
   align-items: center;
@@ -50,6 +81,10 @@ a {
   padding: 0.75rem 1rem;
   background: var(--dp-blue);
   height: 56px;
+}
+
+.dp-nav--fail {
+  background: #9e2d08;
 }
 
 .dp-nav-side {
@@ -224,6 +259,14 @@ a {
   padding: 0;
 }
 
+.dp-doc-outline--editable {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  min-height: 0;
+}
+
 .dp-doc-outline-frame {
   position: relative;
   border-radius: 8px;
@@ -233,7 +276,11 @@ a {
 }
 
 .dp-doc-outline-frame--editable {
-  touch-action: none;
+  flex: 1;
+  min-height: 0;
+  /* touch-action is set to "none" only on individual corner handles,
+     not here — so one-finger drag over the image still scrolls the page. */
+  touch-action: pan-y;
 }
 
 .dp-doc-outline-img {
@@ -241,6 +288,11 @@ a {
   width: 100%;
   height: auto;
   vertical-align: middle;
+}
+
+.dp-doc-outline-frame--editable .dp-doc-outline-img {
+  height: 100%;
+  object-fit: contain;
 }
 
 .dp-doc-outline-svg {
@@ -256,6 +308,7 @@ a {
   font-size: 0.75rem;
   color: var(--dp-text-secondary);
   line-height: 1.3;
+  flex-shrink: 0;
 }
 
 /* ── Buttons ────────────────────────────────── */
@@ -560,15 +613,6 @@ a {
   width: 100%;
   height: 100%;
   pointer-events: none;
-}
-
-.camera-modal-top {
-  position: absolute;
-  top: 1rem;
-  right: 1rem;
-  left: 1rem;
-  display: flex;
-  justify-content: flex-end;
 }
 
 .camera-modal-bottom {
@@ -1176,4 +1220,84 @@ a {
   font-weight: 600;
   text-align: center;
   max-width: 280px;
+}
+
+/* ── No-match / failure result screen ────────────────────────── */
+
+.dp-fail-title {
+  font-size: 1.375rem;    /* 22px */
+  font-weight: 600;
+  color: var(--dp-text);
+  text-align: center;
+  margin: 0.25rem 0 0;
+  line-height: 1.2;
+}
+
+.dp-fail-contact-label {
+  font-size: 1.25rem;     /* 20px */
+  font-weight: 600;
+  color: var(--dp-text);
+  text-align: center;
+  margin: 0.5rem 0 0;
+  letter-spacing: 0.007em;
+}
+
+.dp-fail-phone {
+  font-size: 1rem;        /* 16px */
+  font-weight: 400;
+  color: var(--dp-text);
+  text-align: center;
+  margin: 0.25rem 0 0;
+  letter-spacing: 0.007em;
+  line-height: 1.4;
+}
+
+/* Flexible gap that pushes the buttons to the bottom of the card */
+.dp-fail-spacer {
+  flex: 1;
+  min-height: 2rem;
+}
+
+.dp-fail-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding-top: 0.5rem;
+}
+
+.dp-fail-btn {
+  height: 48px;
+  width: 100%;
+  border-radius: 4px;
+  font-size: 1rem;        /* 16px */
+  font-weight: 500;
+  letter-spacing: 0.007em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.25;
+}
+
+/* Outlined variant — white bg, navy border + text */
+.dp-fail-btn--outline {
+  background: #ffffff;
+  border: 1.5px solid #003b5c;
+  color: #003b5c;
+}
+
+.dp-fail-btn--outline:active {
+  background: #f0f4f8;
+}
+
+/* Solid variant — navy bg, white text */
+.dp-fail-btn--solid {
+  background: #003b5c;
+  border: 1.5px solid transparent;
+  color: #ffffff;
+}
+
+.dp-fail-btn--solid:active {
+  background: #002840;
 }

@@ -31,34 +31,15 @@ function formatAddressBlock(query: string) {
 }
 
 function GateIcon() {
-  return (
-    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true">
-      <path
-        d="M6 14h22v12H6V14zm2-2V10a8 8 0 0116 0v2M8 26v4M28 26v4"
-        stroke="#009CDE"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
+  return <Image src="/gate.svg" alt="" aria-hidden width={36} height={36} />;
 }
 
 function DockDoorIcon() {
-  return (
-    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-      <rect x="6" y="4" width="20" height="24" rx="2" stroke="#009CDE" strokeWidth="2" />
-      <circle cx="22" cy="16" r="1.5" fill="#009CDE" />
-    </svg>
-  );
+  return <Image src="/doors.svg" alt="" aria-hidden width={32} height={32} />;
 }
 
 function CalendarIcon() {
-  return (
-    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true">
-      <rect x="6" y="8" width="24" height="22" rx="2" stroke="#009CDE" strokeWidth="2" />
-      <path d="M6 14h24M12 6v4M24 6v4" stroke="#009CDE" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
+  return <Image src="/calendar.svg" alt="" aria-hidden width={36} height={36} />;
 }
 
 function DetailRow({
@@ -85,6 +66,11 @@ export interface DockGrantedScreenProps {
 
 export function DockGrantedScreen({ appointmentId, dockFromQuery }: DockGrantedScreenProps) {
   const [snapshot, setSnapshot] = useState<GrantedResultSnapshot | null>(null);
+
+  useEffect(() => {
+    document.body.style.background = "#43ac1d";
+    return () => { document.body.style.background = ""; };
+  }, []);
 
   useEffect(() => {
     const raw = sessionStorage.getItem(GRANTED_RESULT_STORAGE_KEY);
@@ -149,12 +135,10 @@ export function DockGrantedScreen({ appointmentId, dockFromQuery }: DockGrantedS
       <header className="dp-result-top">
         <div className="dp-result-status-spacer" aria-hidden="true" />
         <div className="dp-result-brand">
-          <Image src="/myQLogo.svg" alt="myQ" width={26} height={28} />
+          <Image src="/myQLogo.svg" alt="myQ" width={51.65} height={56} />
         </div>
         <button type="button" className="dp-result-menu" aria-label="Menu">
-          <svg width="22" height="16" viewBox="0 0 22 16" fill="none" aria-hidden="true">
-            <path d="M1 1H21M1 8H21M1 15H21" stroke="white" strokeWidth="2" strokeLinecap="round" />
-          </svg>
+          <Image src="/Menu.svg" alt="" aria-hidden width={32} height={32} />
         </button>
       </header>
 
@@ -162,7 +146,7 @@ export function DockGrantedScreen({ appointmentId, dockFromQuery }: DockGrantedS
         <section className="dp-result-card">
           <div className="dp-result-dockpass-row">
             <div className="dp-dockpass-logo dp-result-dockpass-logo">
-              <Image src="/DockpassLogo.svg" alt="DockPass" width={167} height={36} />
+              <Image src="/DockpassLogo.svg" alt="DockPass" width={334} height={59} style={{ width: "100%", height: 59 }} />
             </div>
           </div>
 

@@ -1,5 +1,5 @@
-import Link from "next/link";
 import { DockGrantedScreen } from "@/components/checkin/DockGrantedScreen";
+import { NoMatchScreen } from "@/components/checkin/NoMatchScreen";
 
 interface ResultPageProps {
   searchParams: Promise<{
@@ -11,9 +11,8 @@ interface ResultPageProps {
 
 export default async function ResultPage({ searchParams }: ResultPageProps) {
   const params = await searchParams;
-  const granted = params.status === "granted";
 
-  if (granted) {
+  if (params.status === "granted") {
     return (
       <DockGrantedScreen
         appointmentId={params.appointmentId ?? ""}
@@ -22,22 +21,5 @@ export default async function ResultPage({ searchParams }: ResultPageProps) {
     );
   }
 
-  return (
-    <main className="app-shell">
-      <section className="card stack">
-        <span className="pill">No Match Found</span>
-        <h1 className="title">Please contact the facility.</h1>
-        <p className="subtitle">
-          We could not locate a matching appointment from the provided information.
-        </p>
-        <p className="alert alert-error">Use the posted contact number at the check-in gate.</p>
-
-        <Link href="/checkin">
-          <button className="button button-primary" type="button">
-            Start New Check-In
-          </button>
-        </Link>
-      </section>
-    </main>
-  );
+  return <NoMatchScreen />;
 }

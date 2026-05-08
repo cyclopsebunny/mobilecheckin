@@ -67,10 +67,8 @@ export function DocumentOutlinePreview({
 
   const points = localQuad.map((p) => `${(p.x * 100).toFixed(3)},${(p.y * 100).toFixed(3)}`).join(" ");
 
-  function handlePointerDownCorner(index: number, e: React.PointerEvent<SVGCircleElement>) {
-    if (!editable || adjustDisabled) {
-      return;
-    }
+  function handlePointerDownCorner(index: number, e: React.PointerEvent<HTMLDivElement>) {
+    if (!editable || adjustDisabled) return;
     e.preventDefault();
     e.stopPropagation();
     dragMovedRef.current = false;
@@ -78,10 +76,8 @@ export function DocumentOutlinePreview({
     e.currentTarget.setPointerCapture(e.pointerId);
   }
 
-  function handlePointerMove(e: React.PointerEvent<SVGCircleElement>) {
-    if (dragIndex === null || !imgRef.current) {
-      return;
-    }
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (dragIndex === null || !imgRef.current) return;
     dragMovedRef.current = true;
     const p = safeNormalized(e.clientX, e.clientY, imgRef.current);
     setLocalQuad((prev) => {
@@ -92,17 +88,14 @@ export function DocumentOutlinePreview({
     });
   }
 
-  async function handlePointerUp(e: React.PointerEvent<SVGCircleElement>) {
-    if (dragIndex === null) {
-      return;
-    }
+  async function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (dragIndex === null) return;
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {
       /* ignore */
     }
-    const shouldCommit =
-      dragMovedRef.current && editable && onQuadCommit && !adjustDisabled;
+    const shouldCommit = dragMovedRef.current && editable && onQuadCommit && !adjustDisabled;
     const nextQuad = localQuadRef.current;
     dragMovedRef.current = false;
     setDragIndex(null);
@@ -118,18 +111,14 @@ export function DocumentOutlinePreview({
       className={`dp-doc-outline${editable ? " dp-doc-outline--editable" : ""}`}
       aria-label={label}
     >
-      <div
-        className={`dp-doc-outline-frame${editable ? " dp-doc-outline-frame--editable" : ""}`}
-      >
+      <div className={`dp-doc-outline-frame${editable ? " dp-doc-outline-frame--editable" : ""}`}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img ref={imgRef} className="dp-doc-outline-img" src={rawDataUrl} alt="" draggable={false} />
         <svg
           className="dp-doc-outline-svg"
           viewBox="0 0 100 100"
           preserveAspectRatio="none"
-          aria-hidden={editable ? false : true}
-          role={editable ? "group" : undefined}
-          aria-label={editable ? "Adjust document corners" : undefined}
+          aria-hidden={true}
         >
           <polygon
             points={points}
@@ -138,42 +127,39 @@ export function DocumentOutlinePreview({
             strokeWidth={editable ? "1.1" : "0.75"}
             pointerEvents="none"
           />
-          {editable
-            ? localQuad.map((p, i) => (
-                <g key={i}>
-                  {/* Larger invisible hit target for touch */}
-                  <circle
-                    cx={p.x * 100}
-                    cy={p.y * 100}
-                    r="6"
-                    fill="transparent"
-                    stroke="none"
-                    pointerEvents={handlesDisabled ? "none" : "all"}
-                    cursor={handlesDisabled ? "default" : "grab"}
-                    style={{ touchAction: "none" }}
-                    aria-label={CORNER_LABELS[i]}
-                    onPointerDown={(e) => handlePointerDownCorner(i, e)}
-                    onPointerMove={handlePointerMove}
-                    onPointerUp={(e) => void handlePointerUp(e)}
-                    onPointerCancel={(e) => void handlePointerUp(e)}
-                  />
-                  <circle
-                    cx={p.x * 100}
-                    cy={p.y * 100}
-                    r="3.2"
-                    fill="#0ea5e9"
-                    stroke="#fff"
-                    strokeWidth="1"
-                    pointerEvents="none"
-                  />
-                </g>
-              ))
-            : null}
         </svg>
+        {editable
+          ? localQuad.map((p, i) => (
+              <div
+                key={i}
+                aria-label={CORNER_LABELS[i]}
+                style={{
+                  position: "absolute",
+                  left: `${p.x * 100}%`,
+                  top: `${p.y * 100}%`,
+                  width: 32,
+                  height: 32,
+                  transform: "translate(-50%, -50%)",
+                  borderRadius: "50%",
+                  background: "#0ea5e9",
+                  border: "2.5px solid #fff",
+                  boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+                  touchAction: "none",
+                  cursor: handlesDisabled ? "default" : "grab",
+                  zIndex: 10,
+                  pointerEvents: handlesDisabled ? "none" : "auto",
+                }}
+                onPointerDown={(e) => handlePointerDownCorner(i, e)}
+                onPointerMove={handlePointerMove}
+                onPointerUp={(e) => void handlePointerUp(e)}
+                onPointerCancel={(e) => void handlePointerUp(e)}
+              />
+            ))
+          : null}
       </div>
       <figcaption className="dp-doc-outline-caption">
         {editable
-          ? "Drag the corner dots to adjust the outline. Release to update the cropped image."
+          ? "Drag the corner dots to adjust the outline."
           : label}
       </figcaption>
     </figure>

@@ -26,7 +26,7 @@ import {
   type RequiredFieldPrompt
 } from "@/types/checkin";
 
-type FlowStep = "input" | "cdl-scan" | "analyzing" | "review";
+type FlowStep = "input" | "edit-bol" | "cdl-scan" | "edit-cdl" | "analyzing" | "review";
 
 interface FieldDef {
   key: keyof CheckinPayload;
@@ -192,6 +192,25 @@ export default function CheckinPage() {
   useEffect(() => {
     cdlCaptureRef.current = cdlCapture;
   }, [cdlCapture]);
+
+  // Restore review state after returning from the no-match result page
+  useEffect(() => {
+    const raw = sessionStorage.getItem("checkin_review_resume");
+    if (!raw) return;
+    sessionStorage.removeItem("checkin_review_resume");
+    try {
+      const saved = JSON.parse(raw) as {
+        payload: Partial<CheckinPayload>;
+        fieldConfidence: Record<string, number>;
+      };
+      setPayload(saved.payload);
+      setFieldConfidence(saved.fieldConfidence ?? {});
+      setStep("review");
+    } catch {
+      // ignore corrupt data
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Confidence thresholds
   const CONF_BLANK = 0.35;  // below this: already blanked by normalize
@@ -416,7 +435,13 @@ export default function CheckinPage() {
       const processed = await preprocessDocumentImage(blob, {
         quadHintNormalized: nextQuad
       });
+      const savedScroll = window.scrollY;
       setScanCapture(processed);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.scrollTo({ top: savedScroll, behavior: "instant" });
+        });
+      });
     } catch {
       setError("Could not update crop. Please try again.");
     } finally {
@@ -436,7 +461,13 @@ export default function CheckinPage() {
       const processed = await preprocessDocumentImage(blob, {
         quadHintNormalized: nextQuad
       });
+      const savedScroll = window.scrollY;
       setCdlCapture(processed);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.scrollTo({ top: savedScroll, behavior: "instant" });
+        });
+      });
     } catch {
       setError("Could not update CDL crop. Please try again.");
     } finally {
@@ -462,6 +493,10 @@ export default function CheckinPage() {
       const aptId = encodeURIComponent(result.appointment.id);
       router.push(`/checkin/result?status=granted&dock=${dock}&appointmentId=${aptId}`);
     } else {
+      sessionStorage.setItem(
+        "checkin_review_resume",
+        JSON.stringify({ payload, fieldConfidence })
+      );
       router.push("/checkin/result?status=contact");
     }
   }
@@ -485,6 +520,100 @@ export default function CheckinPage() {
     setError(null);
   }
 
+  if (step === "edit-bol") {
+    return (
+      <div className="dp-shell">
+        <NavHeader onBack={() => setStep("input")} />
+        <div className="dp-layout">
+          <div className="dp-card">
+            <h2 className="dp-section-title">Adjust Document Outline</h2>
+            <p className="dp-hint">Drag the corners to fit your document.</p>
+            {scanCapture ? (
+              <DocumentOutlinePreview
+                key={documentQuadKey(scanCapture.quadNormalized)}
+                rawDataUrl={scanCapture.rawDataUrl}
+                quad={scanCapture.quadNormalized}
+                editable
+                adjustDisabled={isProcessingImage}
+                onQuadCommit={reprocessScanWithQuad}
+              />
+            ) : null}
+            {error ? <p className="dp-error">{error}</p> : null}
+            <div className="dp-button-group">
+              <button
+                className="dp-frameless-btn"
+                type="button"
+                disabled={isProcessingImage}
+                onClick={() => {
+                  setScanCapture(null);
+                  setStep("input");
+                  setShowBolCamera(true);
+                }}
+              >
+                Retake Photo
+              </button>
+              <button
+                className="dp-continue-btn"
+                type="button"
+                disabled={isProcessingImage}
+                onClick={() => setStep("input")}
+              >
+                {isProcessingImage ? "Processing…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === "edit-cdl") {
+    return (
+      <div className="dp-shell">
+        <NavHeader onBack={() => setStep("cdl-scan")} />
+        <div className="dp-layout">
+          <div className="dp-card">
+            <h2 className="dp-section-title">Adjust License Outline</h2>
+            <p className="dp-hint">Drag the corners to fit your license.</p>
+            {cdlCapture ? (
+              <DocumentOutlinePreview
+                key={documentQuadKey(cdlCapture.quadNormalized)}
+                rawDataUrl={cdlCapture.rawDataUrl}
+                quad={cdlCapture.quadNormalized}
+                editable
+                adjustDisabled={isProcessingCdl}
+                onQuadCommit={reprocessCdlWithQuad}
+              />
+            ) : null}
+            {error ? <p className="dp-error">{error}</p> : null}
+            <div className="dp-button-group">
+              <button
+                className="dp-frameless-btn"
+                type="button"
+                disabled={isProcessingCdl}
+                onClick={() => {
+                  setCdlCapture(null);
+                  setStep("cdl-scan");
+                  setShowCdlCamera(true);
+                }}
+              >
+                Retake Photo
+              </button>
+              <button
+                className="dp-continue-btn"
+                type="button"
+                disabled={isProcessingCdl}
+                onClick={() => setStep("cdl-scan")}
+              >
+                {isProcessingCdl ? "Processing…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (step === "cdl-scan") {
     return (
       <div className="dp-shell">
@@ -505,7 +634,7 @@ export default function CheckinPage() {
               <button
                 className="dp-camera-box"
                 type="button"
-                onClick={() => setShowCdlCamera(true)}
+                onClick={() => { if (cdlCapture) { setStep("edit-cdl"); } else { setShowCdlCamera(true); } }}
                 disabled={isProcessingCdl}
                 aria-label="Open camera to scan CDL"
               >
@@ -551,18 +680,6 @@ export default function CheckinPage() {
               onChange={onCdlInputChange}
               style={{ display: "none" }}
             />
-
-            {cdlCapture ? (
-              <DocumentOutlinePreview
-                key={documentQuadKey(cdlCapture.quadNormalized)}
-                rawDataUrl={cdlCapture.rawDataUrl}
-                quad={cdlCapture.quadNormalized}
-                editable
-                adjustDisabled={isProcessingCdl}
-                onQuadCommit={reprocessCdlWithQuad}
-                label="Detected region on original (camera or camera roll)"
-              />
-            ) : null}
 
             {showCdlCamera ? (
               <CameraCapture
@@ -931,7 +1048,7 @@ export default function CheckinPage() {
             <button
               className="dp-camera-box"
               type="button"
-              onClick={() => setShowBolCamera(true)}
+              onClick={() => { if (scanCapture) { setStep("edit-bol"); } else { setShowBolCamera(true); } }}
               disabled={isProcessingImage}
               aria-label="Open camera to scan BOL"
             >
@@ -968,18 +1085,6 @@ export default function CheckinPage() {
             onChange={onFileInputChange}
             style={{ display: "none" }}
           />
-
-          {scanCapture ? (
-            <DocumentOutlinePreview
-              key={documentQuadKey(scanCapture.quadNormalized)}
-              rawDataUrl={scanCapture.rawDataUrl}
-              quad={scanCapture.quadNormalized}
-              editable
-              adjustDisabled={isProcessingImage}
-              onQuadCommit={reprocessScanWithQuad}
-              label="Detected region on original (camera or camera roll)"
-            />
-          ) : null}
 
           {showBolCamera ? (
             <CameraCapture

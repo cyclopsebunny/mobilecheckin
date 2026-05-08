@@ -138,26 +138,10 @@ export function ImageViewer({ src, alt = "Document preview", onClose }: ImageVie
     >
       {/* Close button */}
       <button
+        type="button"
+        className="dp-preview-close-btn"
         onClick={onClose}
         aria-label="Close preview"
-        style={{
-          position: "absolute",
-          top: 16,
-          right: 16,
-          zIndex: 1000,
-          width: 44,
-          height: 44,
-          borderRadius: "50%",
-          background: "rgba(0,0,0,0.65)",
-          border: "2px solid rgba(255,255,255,0.35)",
-          color: "#fff",
-          fontSize: 20,
-          lineHeight: 1,
-          cursor: "pointer",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center"
-        }}
       >
         ✕
       </button>

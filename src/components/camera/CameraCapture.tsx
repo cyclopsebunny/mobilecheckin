@@ -289,6 +289,14 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
     <section className="stack">
       {!hasActiveStream && !preview ? (
         <div className="camera-modal" style={{ background: "#000", justifyContent: "center", alignItems: "center", display: "flex", flexDirection: "column", gap: "1rem" }}>
+          <button
+            type="button"
+            className="dp-preview-close-btn"
+            onClick={handleClose}
+            aria-label="Close"
+          >
+            ✕
+          </button>
           {isOpening ? (
             <p style={{ color: "#fff", margin: 0 }}>Starting camera…</p>
           ) : (
@@ -307,9 +315,6 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
               </button>
             </>
           )}
-          <button className="button button-secondary" type="button" onClick={handleClose}>
-            Cancel
-          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -334,11 +339,14 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
               />
             </svg>
           ) : null}
-          <div className="camera-modal-top">
-            <button className="button button-secondary" type="button" onClick={handleClose}>
-              Close
-            </button>
-          </div>
+          <button
+            type="button"
+            className="dp-preview-close-btn"
+            onClick={handleClose}
+            aria-label="Close camera"
+          >
+            ✕
+          </button>
           <div className="camera-modal-bottom">
             <p className="muted" style={{ color: "#f8fafc", margin: 0 }}>
               {cameraReady
