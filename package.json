@@ -1,0 +1,41 @@
+{
+  "name": "mobile-checkin",
+  "version": "0.1.0",
+  "description": "Mobile web check-in MVP prototype",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "dev:phone": "concurrently -k -n APP,TUNNEL -c blue,green \"npm run dev -- --hostname 0.0.0.0 --port 3000\" \"env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u SOCKS_PROXY -u SOCKS5_PROXY -u http_proxy -u https_proxy -u all_proxy -u socks_proxy -u socks5_proxy npx -y cloudflared tunnel --url http://127.0.0.1:3000 --protocol http2 --no-autoupdate\"",
+    "start:lan": "next start --hostname 0.0.0.0 --port 3000",
+    "tunnel": "env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u SOCKS_PROXY -u SOCKS5_PROXY -u http_proxy -u https_proxy -u all_proxy -u socks_proxy -u socks5_proxy npx -y cloudflared tunnel --url http://127.0.0.1:3000 --protocol http2 --no-autoupdate",
+    "phone:prod": "npm run build && concurrently -k -n APP,TUNNEL -c blue,green \"npm run start:lan\" \"npm run tunnel\"",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --ext .ts,.tsx",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "next": "^16.2.5",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/jsdom": "^28.0.1",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitest/ui": "^4.1.5",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.5",
+    "jsdom": "^29.1.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  }
+}
