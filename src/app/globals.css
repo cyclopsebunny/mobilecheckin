@@ -263,6 +263,7 @@ a {
   flex: 1;
   display: flex;
   flex-direction: column;
+  justify-content: center;
   margin: 0;
   min-height: 0;
 }
@@ -275,8 +276,14 @@ a {
   background: #1a1a1a;
 }
 
+/* Shrink-wrap to the painted photo on both axes so the adjust view shows no
+   dead letterbox area — a wide BOL used to sit in a tall black box. The photo
+   is capped by height so the caption and Retake / Save controls stay on screen. */
 .dp-doc-outline-frame--editable {
-  flex: 1;
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
   min-height: 0;
   /* touch-action is set to "none" only on individual corner handles,
      not here — so one-finger drag over the image still scrolls the page. */
@@ -291,15 +298,22 @@ a {
 }
 
 .dp-doc-outline-frame--editable .dp-doc-outline-img {
-  height: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 56dvh;
+  /* Belt-and-braces: with auto sizing the element box already equals the photo,
+     but if any constraint ever mismatches, letterbox rather than distort — the
+     overlay math handles a letterbox, it cannot correct a stretched image. */
   object-fit: contain;
 }
 
+/* Positioned/sized inline to match the letterboxed image content rect, not the
+   full frame box — see containContentRect(). */
 .dp-doc-outline-svg {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  top: 0;
+  left: 0;
   pointer-events: none;
 }
 
@@ -607,11 +621,12 @@ a {
   display: block;
 }
 
+/* Positioned/sized inline to match the letterboxed video content rect, not the
+   full modal box — see containContentRect(). */
 .camera-modal-overlay {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  top: 0;
+  left: 0;
   pointer-events: none;
 }
 

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { containContentRect } from "@/lib/image/objectFit";
 import type { DocumentQuad, Point } from "@/lib/image/preprocess";
 
 interface DocumentOutlinePreviewProps {
@@ -23,25 +24,17 @@ function clamp01(n: number): number {
   return Math.min(1 - e, Math.max(e, n));
 }
 
-function clientToNormalized(clientX: number, clientY: number, img: HTMLImageElement): Point {
-  const rect = img.getBoundingClientRect();
-  const nx = (clientX - rect.left) / rect.width;
-  const ny = (clientY - rect.top) / rect.height;
-  return { x: clamp01(nx), y: clamp01(ny) };
-}
-
 /** Use as React `key` on the parent so local corner state resets when the server-side quad changes. */
 export function documentQuadKey(q: DocumentQuad): string {
   return q.map((p) => `${p.x},${p.y}`).join("|");
 }
 
-function safeNormalized(clientX: number, clientY: number, img: HTMLImageElement): Point {
-  const rect = img.getBoundingClientRect();
-  if (rect.width < 2 || rect.height < 2) {
-    return { x: 0.5, y: 0.5 };
-  }
-  return clientToNormalized(clientX, clientY, img);
+interface Size {
+  width: number;
+  height: number;
 }
+
+const EMPTY_SIZE: Size = { width: 0, height: 0 };
 
 /**
  * Original photo with normalized quad overlay (same space as perspective correction).
@@ -60,12 +53,82 @@ export function DocumentOutlinePreview({
   const dragMovedRef = useRef(false);
   const [localQuad, setLocalQuad] = useState<DocumentQuad>(() => quad);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [elementSize, setElementSize] = useState<Size>(EMPTY_SIZE);
+  const [naturalSize, setNaturalSize] = useState<Size>(EMPTY_SIZE);
 
   useEffect(() => {
     localQuadRef.current = localQuad;
   }, [localQuad]);
 
+  // Track the <img> element box. In editable mode the image is stretched to fill
+  // the flex frame with `object-fit: contain`, so the element box is larger than
+  // the painted photo and cannot be used as the overlay's coordinate space.
+  useEffect(() => {
+    const element = imgRef.current;
+    if (!element) {
+      return;
+    }
+    // Fractional sizes, not clientWidth/clientHeight — those round to whole
+    // pixels, which would offset the overlay from the photo by up to a pixel.
+    const apply = (width: number, height: number) => {
+      setElementSize((prev) =>
+        Math.abs(prev.width - width) < 0.01 && Math.abs(prev.height - height) < 0.01
+          ? prev
+          : { width, height }
+      );
+    };
+    const initial = element.getBoundingClientRect();
+    apply(initial.width, initial.height);
+    const observer = new ResizeObserver((entries) => {
+      const box = entries[entries.length - 1]?.contentRect;
+      if (box) {
+        apply(box.width, box.height);
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  // Natural size drives the letterbox math. Read it eagerly too, since a cached
+  // or already-decoded image never fires `load`.
+  useEffect(() => {
+    const element = imgRef.current;
+    if (!element) {
+      return;
+    }
+    if (element.complete && element.naturalWidth > 0) {
+      setNaturalSize({ width: element.naturalWidth, height: element.naturalHeight });
+      return;
+    }
+    setNaturalSize(EMPTY_SIZE);
+  }, [rawDataUrl]);
+
+  const contentRect = useMemo(
+    () =>
+      containContentRect(
+        elementSize.width,
+        elementSize.height,
+        naturalSize.width,
+        naturalSize.height
+      ),
+    [elementSize.width, elementSize.height, naturalSize.width, naturalSize.height]
+  );
+
   const points = localQuad.map((p) => `${(p.x * 100).toFixed(3)},${(p.y * 100).toFixed(3)}`).join(" ");
+  const overlayReady = contentRect.width >= 2 && contentRect.height >= 2;
+
+  /** Pointer position → coordinates normalized against the painted photo. */
+  function toNormalized(clientX: number, clientY: number): Point | null {
+    const element = imgRef.current;
+    if (!element || !overlayReady) {
+      return null;
+    }
+    const rect = element.getBoundingClientRect();
+    return {
+      x: clamp01((clientX - rect.left - contentRect.left) / contentRect.width),
+      y: clamp01((clientY - rect.top - contentRect.top) / contentRect.height)
+    };
+  }
 
   function handlePointerDownCorner(index: number, e: React.PointerEvent<HTMLDivElement>) {
     if (!editable || adjustDisabled) return;
@@ -77,9 +140,10 @@ export function DocumentOutlinePreview({
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (dragIndex === null || !imgRef.current) return;
+    if (dragIndex === null) return;
+    const p = toNormalized(e.clientX, e.clientY);
+    if (!p) return;
     dragMovedRef.current = true;
-    const p = safeNormalized(e.clientX, e.clientY, imgRef.current);
     setLocalQuad((prev) => {
       const next = [...prev] as DocumentQuad;
       next[dragIndex] = p;
@@ -113,30 +177,51 @@ export function DocumentOutlinePreview({
     >
       <div className={`dp-doc-outline-frame${editable ? " dp-doc-outline-frame--editable" : ""}`}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img ref={imgRef} className="dp-doc-outline-img" src={rawDataUrl} alt="" draggable={false} />
-        <svg
-          className="dp-doc-outline-svg"
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-          aria-hidden={true}
-        >
-          <polygon
-            points={points}
-            fill="rgba(14, 165, 233, 0.14)"
-            stroke="rgba(56, 189, 248, 0.95)"
-            strokeWidth={editable ? "1.1" : "0.75"}
-            pointerEvents="none"
-          />
-        </svg>
-        {editable
+        <img
+          ref={imgRef}
+          className="dp-doc-outline-img"
+          src={rawDataUrl}
+          alt=""
+          draggable={false}
+          onLoad={(e) =>
+            setNaturalSize({
+              width: e.currentTarget.naturalWidth,
+              height: e.currentTarget.naturalHeight
+            })
+          }
+        />
+        {overlayReady ? (
+          <svg
+            className="dp-doc-outline-svg"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            aria-hidden={true}
+            style={{
+              left: contentRect.left,
+              top: contentRect.top,
+              width: contentRect.width,
+              height: contentRect.height
+            }}
+          >
+            <polygon
+              points={points}
+              fill="rgba(14, 165, 233, 0.14)"
+              stroke="rgba(56, 189, 248, 0.95)"
+              strokeWidth={editable ? 3 : 2}
+              vectorEffect="non-scaling-stroke"
+              pointerEvents="none"
+            />
+          </svg>
+        ) : null}
+        {editable && overlayReady
           ? localQuad.map((p, i) => (
               <div
                 key={i}
                 aria-label={CORNER_LABELS[i]}
                 style={{
                   position: "absolute",
-                  left: `${p.x * 100}%`,
-                  top: `${p.y * 100}%`,
+                  left: contentRect.left + p.x * contentRect.width,
+                  top: contentRect.top + p.y * contentRect.height,
                   width: 32,
                   height: 32,
                   transform: "translate(-50%, -50%)",
