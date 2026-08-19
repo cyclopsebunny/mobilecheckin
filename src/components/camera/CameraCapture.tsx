@@ -3,14 +3,26 @@
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import {
+  containContentRect,
+  type ContentRect,
+  contentRectsEqual
+} from "@/lib/image/objectFit";
+import {
   detectDocumentQuad,
   type DocumentQuad,
   preprocessDocumentImage,
   type ProcessedImageResult
 } from "@/lib/image/preprocess";
 
+/**
+ * How the document reached us. `"camera"` frames carry a live edge-detection
+ * hint, `"upload"` frames don't — so callers generally want to confirm the crop
+ * for uploads.
+ */
+export type DocumentCaptureSource = "camera" | "upload";
+
 interface CameraCaptureProps {
-  onDocumentReady: (result: ProcessedImageResult) => void;
+  onDocumentReady: (result: ProcessedImageResult, source: DocumentCaptureSource) => void;
   onClose?: () => void;
   title?: string;
   autoOpen?: boolean;
@@ -26,6 +38,8 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
   const [isProcessing, setIsProcessing] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [detectedQuad, setDetectedQuad] = useState<DocumentQuad | null>(null);
+  /** Letterboxed content rect of the video inside its element box — the overlay's coordinate space. */
+  const [videoContentRect, setVideoContentRect] = useState<ContentRect | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ProcessedImageResult | null>(null);
 
@@ -45,6 +59,7 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
     setHasActiveStream(false);
     setCameraReady(false);
     setDetectedQuad(null);
+    setVideoContentRect(null);
   }
 
   async function requestStream(): Promise<MediaStream> {
@@ -99,8 +114,25 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
         return;
       }
 
-      const sampleWidth = 640;
-      const sampleHeight = Math.max(360, Math.round((video.videoHeight / video.videoWidth) * sampleWidth));
+      // Keep the overlay's coordinate space in sync with where the video frame
+      // is actually painted. `object-fit: contain` letterboxes the frame, and
+      // the letterbox flips axis when the device rotates, so recompute each tick
+      // rather than only on mount.
+      const videoBox = video.getBoundingClientRect();
+      const nextContentRect = containContentRect(
+        videoBox.width,
+        videoBox.height,
+        video.videoWidth,
+        video.videoHeight
+      );
+      setVideoContentRect((prev) => (contentRectsEqual(prev, nextContentRect) ? prev : nextContentRect));
+
+      // Sample at a fixed long edge so the detection buffer keeps the frame's
+      // aspect ratio in both orientations — the quad is normalized against these
+      // dimensions, so any distortion here shifts the overlay.
+      const sampleScale = 640 / Math.max(video.videoWidth, video.videoHeight);
+      const sampleWidth = Math.max(16, Math.round(video.videoWidth * sampleScale));
+      const sampleHeight = Math.max(16, Math.round(video.videoHeight * sampleScale));
       if (!detectionCanvasRef.current) {
         detectionCanvasRef.current = document.createElement("canvas");
       }
@@ -213,7 +245,7 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
     }
   }
 
-  async function processBlob(blob: Blob, quadHint?: DocumentQuad | null) {
+  async function processBlob(blob: Blob, source: DocumentCaptureSource, quadHint?: DocumentQuad | null) {
     setIsProcessing(true);
     setError(null);
     try {
@@ -221,7 +253,7 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
         quadHintNormalized: quadHint ?? undefined
       });
       setPreview(processed);
-      onDocumentReady(processed);
+      onDocumentReady(processed, source);
       stopCamera();
       onClose?.();
     } catch {
@@ -254,7 +286,7 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
       const blob = await new Promise<Blob>((resolve, reject) =>
         canvas.toBlob((value) => (value ? resolve(value) : reject(new Error("Capture failed."))), "image/jpeg", 0.97)
       );
-      await processBlob(blob, detectedQuad);
+      await processBlob(blob, "camera", detectedQuad);
     } catch (error) {
       const message =
         error instanceof Error && error.message
@@ -271,7 +303,7 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
     if (!file) {
       return;
     }
-    await processBlob(file, null);
+    await processBlob(file, "upload", null);
     event.target.value = "";
   }
 
@@ -329,13 +361,24 @@ export function CameraCapture({ onDocumentReady, onClose, title = "Scan Document
       {hasActiveStream ? (
         <div className="camera-modal">
           <video ref={videoRef} playsInline muted autoPlay className="camera-modal-video" />
-          {detectedQuad ? (
-            <svg className="camera-modal-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+          {detectedQuad && videoContentRect ? (
+            <svg
+              className="camera-modal-overlay"
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+              style={{
+                left: videoContentRect.left,
+                top: videoContentRect.top,
+                width: videoContentRect.width,
+                height: videoContentRect.height
+              }}
+            >
               <polygon
                 points={detectedQuad.map((point) => `${(point.x * 100).toFixed(2)},${(point.y * 100).toFixed(2)}`).join(" ")}
                 fill="rgba(14, 165, 233, 0.15)"
                 stroke="rgba(56, 189, 248, 0.95)"
-                strokeWidth="0.8"
+                strokeWidth="2"
+                vectorEffect="non-scaling-stroke"
               />
             </svg>
           ) : null}

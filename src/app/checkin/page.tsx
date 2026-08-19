@@ -247,6 +247,9 @@ export default function CheckinPage() {
       const processed = await preprocessDocumentImage(file);
       setScanCapture(processed);
       setDigits(["", "", "", "", ""]);
+      // Gallery images get no live detection hint, so edge detection is a rough
+      // first guess — send the driver straight to the crop-adjust view to confirm.
+      setStep("edit-bol");
     } catch {
       setError("Could not process the image. Please try again.");
     } finally {
@@ -363,6 +366,8 @@ export default function CheckinPage() {
     try {
       const processed = await preprocessDocumentImage(file);
       setCdlCapture(processed);
+      // Same as the BOL gallery path — confirm the crop before extraction.
+      setStep("edit-cdl");
     } catch {
       setError("Could not process the CDL image. Please try again.");
     } finally {
@@ -684,9 +689,12 @@ export default function CheckinPage() {
             {showCdlCamera ? (
               <CameraCapture
                 title="driver's license"
-                onDocumentReady={(result) => {
+                onDocumentReady={(result, source) => {
                   setCdlCapture(result);
                   setShowCdlCamera(false);
+                  if (source === "upload") {
+                    setStep("edit-cdl");
+                  }
                 }}
                 onClose={() => setShowCdlCamera(false)}
               />
@@ -1089,10 +1097,13 @@ export default function CheckinPage() {
           {showBolCamera ? (
             <CameraCapture
               title="BOL document"
-              onDocumentReady={(result) => {
+              onDocumentReady={(result, source) => {
                 setScanCapture(result);
                 setDigits(["", "", "", "", ""]);
                 setShowBolCamera(false);
+                if (source === "upload") {
+                  setStep("edit-bol");
+                }
               }}
               onClose={() => setShowBolCamera(false)}
             />
