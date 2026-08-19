@@ -491,16 +491,26 @@ export default function CheckinPage() {
       signal: controller.signal
     })
       .then(async (response) => {
-        const data = (await response.json().catch(() => ({}))) as {
+        let readable = true;
+        const data = (await response.json().catch(() => {
+          readable = false;
+          return {};
+        })) as {
           extracted?: ExtractedCdlData;
           validation?: CdlValidation;
           error?: string;
         };
         if (!response.ok) {
-          throw new Error(data.error ?? `The CDL check failed (${response.status}).`);
+          throw new Error(data.error ?? `The CDL check failed (HTTP ${response.status}).`);
         }
         if (!data.validation) {
-          throw new Error("The CDL check returned no result.");
+          // Include enough detail to tell an unreadable body apart from a
+          // well-formed response that simply carried no verdict.
+          throw new Error(
+            readable
+              ? `The CDL check returned no verdict (HTTP ${response.status}).`
+              : `The CDL check returned an unreadable response (HTTP ${response.status}).`
+          );
         }
         if (data.extracted) {
           setCdlExtracted(data.extracted);

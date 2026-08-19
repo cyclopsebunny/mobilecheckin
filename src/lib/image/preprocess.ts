@@ -222,9 +222,25 @@ export function detectDocumentQuad(imageData: ImageData): DocumentQuad {
   }
   mean /= blurred.length;
 
-  // Force the threshold above the mean so we are clearly selecting the
-  // brighter half (paper) even when Otsu finds a lower split.
-  const threshold = Math.max(otsu, Math.min(240, Math.round(mean + 25)));
+  // Nudge the threshold above the mean so we clearly select the brighter half
+  // (paper) even when Otsu finds a lower split.
+  let threshold = Math.max(otsu, Math.min(240, Math.round(mean + 25)));
+
+  // That nudge assumes the document is a minority of the frame. Held close to
+  // the camera it fills the frame, so the mean IS the document and mean+25
+  // thresholds the document out — leaving only specular glare, which then wins
+  // the scoring below because it does not touch the border. If almost nothing
+  // survives, the nudge was wrong for this photo; fall back to Otsu's split.
+  const MIN_FOREGROUND_FRACTION = 0.12;
+  let aboveThreshold = 0;
+  for (let i = 0; i < blurred.length; i += 1) {
+    if (blurred[i] >= threshold) {
+      aboveThreshold += 1;
+    }
+  }
+  if (aboveThreshold < blurred.length * MIN_FOREGROUND_FRACTION) {
+    threshold = otsu;
+  }
 
   const mask = new Uint8Array(width * height);
   const borderX = Math.max(2, Math.round(width * 0.02));
@@ -326,7 +342,11 @@ export function detectDocumentQuad(imageData: ImageData): DocumentQuad {
       bound.minY <= borderY + 1 ||
       bound.maxX >= width - borderX - 2 ||
       bound.maxY >= height - borderY - 2;
-    const edgePenalty = touchesEdge ? 0.3 : 0;
+    // The penalty is meant to reject wall/floor/table bleeding off the frame.
+    // A *solid* component running to the edge is almost always a document held
+    // close to the camera, so exempt it — otherwise filling the frame, which is
+    // what people naturally do, handicaps the real document.
+    const edgePenalty = touchesEdge && solidity < 0.75 ? 0.3 : 0;
 
     const score =
       sizeScore * 0.35 +
