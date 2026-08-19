@@ -203,6 +203,13 @@ export default function CheckinPage() {
   const [cdlCapture, setCdlCapture] = useState<ProcessedImageResult | null>(null);
   const [cdlExtracted, setCdlExtracted] = useState<ExtractedCdlData | null>(null);
   const [cdlValidation, setCdlValidation] = useState<CdlValidation | null>(null);
+  /**
+   * The CDL check needs a real state machine, not "validation is still null".
+   * Any failure — non-OK response, missing validation, network error, timeout —
+   * must land on "failed" so the badge stops spinning and offers a retry.
+   */
+  const [cdlCheck, setCdlCheck] = useState<"idle" | "checking" | "done" | "failed">("idle");
+  const [cdlCheckError, setCdlCheckError] = useState<string | null>(null);
   const [isProcessingImage, setIsProcessingImage] = useState(false);
   const [isProcessingCdl, setIsProcessingCdl] = useState(false);
   const [payload, setPayload] = useState<Partial<CheckinPayload>>({});
@@ -242,6 +249,10 @@ export default function CheckinPage() {
       if (captures) {
         setDocuments(captures.documents);
         setCdlCapture(captures.cdlCapture);
+        setCdlExtracted(captures.cdlExtracted);
+        setCdlValidation(captures.cdlValidation);
+        // Only claim "done" if a result actually came back before we left.
+        setCdlCheck(captures.cdlValidation ? "done" : "idle");
       }
       setStep("review");
     } catch {
@@ -426,32 +437,7 @@ export default function CheckinPage() {
 
         // Fire CDL verification if we captured one
         if (cdlCapture) {
-          fetch("/api/extract-cdl", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              imageDataUrl: cdlCapture.processedDataUrl,
-              driverName: nextPayload.driverName
-            })
-          })
-            .then((r) => r.json() as Promise<{ extracted?: ExtractedCdlData; validation?: CdlValidation }>)
-            .then((data) => {
-              if (data.extracted) {
-                setCdlExtracted(data.extracted);
-                // Merge CDL fields into payload where BOL left gaps
-                setPayload((prev) => {
-                  const merged = { ...prev };
-                  if (!merged.driverName && data.extracted?.fullName) {
-                    merged.driverName = data.extracted.fullName;
-                  }
-                  // Recompute missing prompts with the merged payload
-                  setMissingPrompts(getMissingRequiredPrompts(merged as CheckinPayload));
-                  return merged;
-                });
-              }
-              if (data.validation) setCdlValidation(data.validation);
-            })
-            .catch(() => {/* non-fatal */});
+          verifyCdl(cdlCapture.processedDataUrl, nextPayload.driverName);
         }
 
         // Fire carrier verification in the background if we have a carrier name
@@ -489,6 +475,61 @@ export default function CheckinPage() {
     await handleCdlFileSelected(file);
     event.target.value = "";
   }
+
+  const verifyCdl = useCallback((imageDataUrl: string, driverName?: string) => {
+    setCdlCheck("checking");
+    setCdlCheckError(null);
+    setCdlValidation(null);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 45_000);
+
+    fetch("/api/extract-cdl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageDataUrl, driverName }),
+      signal: controller.signal
+    })
+      .then(async (response) => {
+        const data = (await response.json().catch(() => ({}))) as {
+          extracted?: ExtractedCdlData;
+          validation?: CdlValidation;
+          error?: string;
+        };
+        if (!response.ok) {
+          throw new Error(data.error ?? `The CDL check failed (${response.status}).`);
+        }
+        if (!data.validation) {
+          throw new Error("The CDL check returned no result.");
+        }
+        if (data.extracted) {
+          setCdlExtracted(data.extracted);
+          // Merge CDL fields into the payload where the BOL left gaps
+          setPayload((prev) => {
+            const merged = { ...prev };
+            if (!merged.driverName && data.extracted?.fullName) {
+              merged.driverName = data.extracted.fullName;
+            }
+            setMissingPrompts(getMissingRequiredPrompts(merged as CheckinPayload));
+            return merged;
+          });
+        }
+        setCdlValidation(data.validation);
+        setCdlCheck("done");
+      })
+      .catch((ex: unknown) => {
+        const aborted = ex instanceof DOMException && ex.name === "AbortError";
+        setCdlCheckError(
+          aborted
+            ? "The CDL check timed out."
+            : ex instanceof Error
+              ? ex.message
+              : "The CDL check could not be completed."
+        );
+        setCdlCheck("failed");
+      })
+      .finally(() => window.clearTimeout(timeout));
+  }, []);
 
   const verifyCarrier = useCallback((name: string) => {
     if (!name.trim()) return;
@@ -612,7 +653,7 @@ export default function CheckinPage() {
         "checkin_review_resume",
         JSON.stringify({ payload, fieldConfidence })
       );
-      stashCaptures({ documents, cdlCapture });
+      stashCaptures({ documents, cdlCapture, cdlExtracted, cdlValidation });
       router.push("/checkin/result?status=contact");
     }
   }
@@ -630,6 +671,8 @@ export default function CheckinPage() {
     setCdlCapture(null);
     setCdlExtracted(null);
     setCdlValidation(null);
+    setCdlCheck("idle");
+    setCdlCheckError(null);
     setPayload({});
     setMissingPrompts([]);
     setCarrierVerification(null);
@@ -1093,7 +1136,7 @@ export default function CheckinPage() {
                 </div>
               ) : null}
 
-              {cdlCapture && (cdlValidation ? (
+              {cdlCapture && cdlCheck === "done" && cdlValidation ? (
                 <div className={`dp-carrier-badge dp-carrier-${cdlValidation.alertLevel}`} role="status">
                   <span className="dp-carrier-icon">
                     {cdlValidation.alertLevel === "clear" ? "✓" : cdlValidation.alertLevel === "warn" ? "⚠" : "✕"}
@@ -1109,12 +1152,31 @@ export default function CheckinPage() {
                     ) : null}
                   </div>
                 </div>
-              ) : (
-                <div className="dp-carrier-badge dp-carrier-checking">
+              ) : null}
+
+              {cdlCapture && cdlCheck === "checking" ? (
+                <div className="dp-carrier-badge dp-carrier-checking" role="status">
                   <div className="dp-carrier-spinner" />
                   <span>Verifying CDL…</span>
                 </div>
-              ))}
+              ) : null}
+
+              {cdlCapture && (cdlCheck === "failed" || cdlCheck === "idle") ? (
+                <div className="dp-carrier-badge dp-carrier-block" role="status">
+                  <span className="dp-carrier-icon">✕</span>
+                  <div className="dp-carrier-text">
+                    <strong>CDL not verified</strong>
+                    <span>{cdlCheckError ?? "The licence has not been checked yet."}</span>
+                    <button
+                      className="dp-carrier-retry"
+                      type="button"
+                      onClick={() => verifyCdl(cdlCapture.processedDataUrl, payload.driverName)}
+                    >
+                      Retry CDL check
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {missing.length > 0 ? (
                 <p className="dp-missing-banner" style={{ marginTop: "0.75rem" }}>

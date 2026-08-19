@@ -683,6 +683,15 @@ function enhanceContrastBrightness(canvas: HTMLCanvasElement): HTMLCanvasElement
     if (lum > max) max = lum;
   }
 
+  // A near-uniform image (blank page, badly overexposed photo) has nothing to
+  // stretch. Pushing on regardless divides by a range clamped to 1, which
+  // amplifies trivial per-channel differences into a violent colour cast —
+  // an off-white (246, 245, 240) comes out as pure yellow (255, 255, 0).
+  const MIN_USEFUL_RANGE = 8;
+  if (max - min < MIN_USEFUL_RANGE) {
+    return canvas;
+  }
+
   // Leave a small headroom (2%) on each end to avoid blown highlights / crushed
   // blacks while still stretching most of the dynamic range.
   const headroom = Math.round((max - min) * 0.02);

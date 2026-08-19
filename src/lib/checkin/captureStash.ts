@@ -1,4 +1,5 @@
 import type { ProcessedImageResult } from "@/lib/image/preprocess";
+import type { CdlValidation, ExtractedCdlData } from "@/types/checkin";
 import type { UploadedDocument } from "@/types/documents";
 
 /**
@@ -16,12 +17,15 @@ import type { UploadedDocument } from "@/types/documents";
 interface StashedCaptures {
   documents: UploadedDocument[];
   cdlCapture: ProcessedImageResult | null;
+  /** Carried too, so returning does not re-open the CDL check. */
+  cdlExtracted: ExtractedCdlData | null;
+  cdlValidation: CdlValidation | null;
 }
 
 let stashed: StashedCaptures | null = null;
 
 export function stashCaptures(value: StashedCaptures): void {
-  stashed = { documents: [...value.documents], cdlCapture: value.cdlCapture };
+  stashed = { ...value, documents: [...value.documents] };
 }
 
 /** Non-destructive so a double-invoked effect restores the same thing twice. */
