@@ -14,14 +14,18 @@ interface OpenAiMessage {
       >;
 }
 
+/** Thrown when the server cannot extract at all, as opposed to reading nothing. */
+class ExtractionUnavailable extends Error {}
+
 async function callCloudExtractor(imageDataUrl: string): Promise<Record<string, unknown>> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return {
-      referenceLast5: "",
-      confidence: 0.5,
-      notes: "OPENAI_API_KEY missing, using fallback extraction."
-    };
+    // Returning an empty extraction here is indistinguishable from a genuinely
+    // unreadable document, so the driver sees a blank review screen and assumes
+    // their photo was bad. Fail loudly instead.
+    throw new ExtractionUnavailable(
+      "Document extraction is not configured on this server (OPENAI_API_KEY is missing)."
+    );
   }
 
   const messages: OpenAiMessage[] = [
@@ -143,6 +147,7 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Extraction failed.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = error instanceof ExtractionUnavailable ? 503 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }
