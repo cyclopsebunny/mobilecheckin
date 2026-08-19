@@ -1316,3 +1316,180 @@ a {
 .dp-fail-btn--solid:active {
   background: #002840;
 }
+
+/* ── Document type bottom sheet ──────────────── */
+
+.dp-sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+/* Full-bleed dismiss target above the sheet, so tapping the scrim cancels. */
+.dp-sheet-dismiss {
+  flex: 1;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.dp-sheet {
+  background: #fff;
+  border-radius: 20px 20px 0 0;
+  padding: 0.5rem 0 1.25rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.25);
+}
+
+.dp-sheet-grabber {
+  width: 44px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--dp-divider);
+  margin: 0.25rem 0 0.75rem;
+}
+
+.dp-sheet-title {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--dp-text);
+  text-align: center;
+}
+
+.dp-sheet-subtitle {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.9rem;
+  color: var(--dp-text-secondary);
+  text-align: center;
+  padding: 0 1.25rem;
+}
+
+.dp-sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.dp-sheet-option {
+  width: 100%;
+  padding: 1rem;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--dp-divider);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--dp-prussian);
+  cursor: pointer;
+}
+
+.dp-sheet-option:active {
+  background: #f0f4f8;
+}
+
+.dp-sheet-cancel {
+  margin-top: 0.75rem;
+  width: calc(100% - 2rem);
+  padding: 0.85rem;
+  border-radius: 4px;
+  border: 1.5px solid var(--dp-prussian);
+  background: #fff;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--dp-prussian);
+  cursor: pointer;
+}
+
+/* ── Uploaded document list ──────────────────── */
+
+.dp-doc-list {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0.25rem;
+  width: 100%;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid var(--dp-divider);
+  max-height: 232px;
+  overflow-y: auto;
+}
+
+.dp-doc-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.5rem;
+}
+
+.dp-doc-row + .dp-doc-row {
+  border-top: 1px solid #eef2f6;
+}
+
+.dp-doc-row-icon {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.dp-doc-row-main {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.dp-doc-row-main:disabled {
+  cursor: default;
+}
+
+.dp-doc-row-name {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--dp-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-doc-row-type {
+  flex-shrink: 0;
+  max-width: 84px;
+  font-size: 0.85rem;
+  color: var(--dp-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-doc-row-remove {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0.25rem;
+  cursor: pointer;
+  display: flex;
+}
+
+.dp-doc-row-remove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dp-doc-pdf-note {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  color: var(--dp-text-secondary);
+  font-style: italic;
+  text-align: center;
+}

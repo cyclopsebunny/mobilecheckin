@@ -13,7 +13,10 @@ import { useRouter } from "next/navigation";
 import { CameraCapture } from "@/components/camera/CameraCapture";
 import { DocumentOutlinePreview, documentQuadKey } from "@/components/DocumentOutlinePreview";
 import { ImageViewer } from "@/components/ImageViewer";
+import { DocumentList } from "@/components/checkin/DocumentList";
+import { DocumentTypeSheet } from "@/components/checkin/DocumentTypeSheet";
 import { dataUrlToBlob } from "@/lib/image/dataUrl";
+import { buildUploadedDocument, UploadRejected } from "@/lib/documents/intake";
 import { preprocessDocumentImage, type DocumentQuad, type ProcessedImageResult } from "@/lib/image/preprocess";
 import { saveGrantedSnapshot } from "@/lib/checkin/resultSnapshot";
 import { matchAppointment } from "@/lib/matching/matchAppointment";
@@ -25,8 +28,30 @@ import {
   type ExtractedCdlData,
   type RequiredFieldPrompt
 } from "@/types/checkin";
+import {
+  documentTypeLabel,
+  findAnalyzableDocument,
+  type DocumentType,
+  type UploadedDocument
+} from "@/types/documents";
 
-type FlowStep = "input" | "edit-bol" | "cdl-scan" | "edit-cdl" | "analyzing" | "review";
+type FlowStep =
+  | "shipment-id"
+  | "documents"
+  | "edit-doc"
+  | "cdl-scan"
+  | "edit-cdl"
+  | "analyzing"
+  | "review";
+
+/**
+ * An upload waiting on its document type. Files still need processing; camera
+ * captures are already processed (with a live edge-detection hint) and only
+ * need filing.
+ */
+type PendingIntake =
+  | { kind: "file"; file: File }
+  | { kind: "capture"; image: ProcessedImageResult };
 
 interface FieldDef {
   key: keyof CheckinPayload;
@@ -162,13 +187,18 @@ export default function CheckinPage() {
   const d4 = useRef<HTMLInputElement>(null);
   const digitRefs = [d0, d1, d2, d3, d4];
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const cdlGalleryRef = useRef<HTMLInputElement>(null);
 
   const [digits, setDigits] = useState(["", "", "", "", ""]);
-  const [step, setStep] = useState<FlowStep>("input");
+  const [step, setStep] = useState<FlowStep>("shipment-id");
   const [showBolCamera, setShowBolCamera] = useState(false);
   const [showCdlCamera, setShowCdlCamera] = useState(false);
-  const [scanCapture, setScanCapture] = useState<ProcessedImageResult | null>(null);
+  const [documents, setDocuments] = useState<UploadedDocument[]>([]);
+  /** Upload awaiting a document-type choice in the bottom sheet. */
+  const [pendingIntake, setPendingIntake] = useState<PendingIntake | null>(null);
+  /** Which document the outline editor is currently adjusting. */
+  const [editingDocId, setEditingDocId] = useState<string | null>(null);
   const [cdlCapture, setCdlCapture] = useState<ProcessedImageResult | null>(null);
   const [cdlExtracted, setCdlExtracted] = useState<ExtractedCdlData | null>(null);
   const [cdlValidation, setCdlValidation] = useState<CdlValidation | null>(null);
@@ -184,11 +214,11 @@ export default function CheckinPage() {
   const [viewerSrc, setViewerSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const scanCaptureRef = useRef<ProcessedImageResult | null>(null);
+  const documentsRef = useRef<UploadedDocument[]>([]);
   const cdlCaptureRef = useRef<ProcessedImageResult | null>(null);
   useEffect(() => {
-    scanCaptureRef.current = scanCapture;
-  }, [scanCapture]);
+    documentsRef.current = documents;
+  }, [documents]);
   useEffect(() => {
     cdlCaptureRef.current = cdlCapture;
   }, [cdlCapture]);
@@ -218,7 +248,11 @@ export default function CheckinPage() {
 
   const reference = digits.join("").replace(/\s/g, "");
   const hasReference = reference.length === 5;
-  const canContinue = (hasReference || scanCapture !== null) && !isProcessingImage;
+  // Shipment ID is required to leave the first screen. Documents are optional —
+  // an uploaded BOL enriches the match but never gates it.
+  const canContinueShipment = hasReference && !isProcessingImage;
+  /** The one document we extract from: the first Bill of Lading, if any. */
+  const analyzedDoc = findAnalyzableDocument(documents);
 
   function handleDigitChange(index: number, event: ChangeEvent<HTMLInputElement>) {
     const val = event.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(-1).toUpperCase();
@@ -240,43 +274,87 @@ export default function CheckinPage() {
     }
   }
 
-  async function handleFileSelected(file: File) {
+  /** Intake step 1: hold the upload and ask what kind of document it is. */
+  function onDocumentFileChosen(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    setError(null);
+    setPendingIntake({ kind: "file", file });
+  }
+
+  /**
+   * Intake step 2: the type is known, so process and file it. Uploads and
+   * captures both land here — the type decides whether we ever read the pixels.
+   */
+  async function onDocumentTypeChosen(docType: DocumentType) {
+    const intake = pendingIntake;
+    setPendingIntake(null);
+    if (!intake) {
+      return;
+    }
+
     setIsProcessingImage(true);
     setError(null);
     try {
-      const processed = await preprocessDocumentImage(file);
-      setScanCapture(processed);
-      setDigits(["", "", "", "", ""]);
-      // Gallery images get no live detection hint, so edge detection is a rough
-      // first guess — send the driver straight to the crop-adjust view to confirm.
-      setStep("edit-bol");
-    } catch {
-      setError("Could not process the image. Please try again.");
+      let doc: UploadedDocument;
+      if (intake.kind === "file") {
+        doc = await buildUploadedDocument(intake.file, docType);
+      } else {
+        // Already processed by CameraCapture with a live detection hint.
+        doc = {
+          id: crypto.randomUUID(),
+          fileName: `capture-${documents.length + 1}.jpg`,
+          docType,
+          sizeBytes: intake.image.processedDataUrl.length,
+          fromPdf: false,
+          image: intake.image
+        };
+      }
+      setDocuments((prev) => [...prev, doc]);
+
+      // Confirm the crop for anything with a real scene in it. A rasterised PDF
+      // page is already flat and deskewed, so there is nothing to adjust.
+      if (!doc.fromPdf) {
+        setEditingDocId(doc.id);
+        setStep("edit-doc");
+      }
+    } catch (ex) {
+      setError(
+        ex instanceof UploadRejected
+          ? ex.message
+          : "Could not process that file. Please try again."
+      );
     } finally {
       setIsProcessingImage(false);
     }
   }
 
-  async function onFileInputChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
+  function removeDocument(id: string) {
+    setDocuments((prev) => prev.filter((doc) => doc.id !== id));
+    if (editingDocId === id) {
+      setEditingDocId(null);
     }
-    await handleFileSelected(file);
-    event.target.value = "";
   }
 
-  async function handleContinue() {
+  function handleShipmentIdContinue() {
     setError(null);
-    // Both manual and scan flows go to CDL scan step first
+    setStep("documents");
+  }
+
+  function handleDocumentsContinue() {
+    setError(null);
     setStep("cdl-scan");
   }
 
   async function handleCdlContinue() {
     setError(null);
 
-    if (hasReference && !scanCapture) {
-      // Manual reference path — match now
+    if (!analyzedDoc) {
+      // No Bill of Lading attached — match on the Shipment ID alone. Invoices and
+      // packing lists are deliberately never read, so they cannot fill this in.
       const result = matchAppointment({
         method: "manual",
         referenceLast5: reference.toUpperCase()
@@ -295,13 +373,13 @@ export default function CheckinPage() {
       return;
     }
 
-    if (scanCapture) {
+    if (analyzedDoc) {
       setStep("analyzing");
       try {
         const response = await fetch("/api/extract-document", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageDataUrl: scanCapture.processedDataUrl })
+          body: JSON.stringify({ imageDataUrl: analyzedDoc.image.processedDataUrl })
         });
         const json = (await response.json()) as {
           extracted?: Partial<CheckinPayload>;
@@ -355,7 +433,7 @@ export default function CheckinPage() {
         setStep("review");
       } catch (ex) {
         setError(ex instanceof Error ? ex.message : "Extraction failed.");
-        setStep("input");
+        setStep("documents");
       }
     }
   }
@@ -428,20 +506,22 @@ export default function CheckinPage() {
     });
   }
 
-  async function reprocessScanWithQuad(nextQuad: DocumentQuad) {
-    const prev = scanCaptureRef.current;
-    if (!prev) {
+  async function reprocessDocumentWithQuad(nextQuad: DocumentQuad) {
+    const target = documentsRef.current.find((doc) => doc.id === editingDocId);
+    if (!target) {
       return;
     }
     setIsProcessingImage(true);
     setError(null);
     try {
-      const blob = await dataUrlToBlob(prev.rawDataUrl);
+      const blob = await dataUrlToBlob(target.image.rawDataUrl);
       const processed = await preprocessDocumentImage(blob, {
         quadHintNormalized: nextQuad
       });
       const savedScroll = window.scrollY;
-      setScanCapture(processed);
+      setDocuments((prev) =>
+        prev.map((doc) => (doc.id === target.id ? { ...doc, image: processed } : doc))
+      );
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           window.scrollTo({ top: savedScroll, behavior: "instant" });
@@ -507,11 +587,13 @@ export default function CheckinPage() {
   }
 
   function resetFlow() {
-    setStep("input");
+    setStep("shipment-id");
     setDigits(["", "", "", "", ""]);
     setShowBolCamera(false);
     setShowCdlCamera(false);
-    setScanCapture(null);
+    setDocuments([]);
+    setPendingIntake(null);
+    setEditingDocId(null);
     setCdlCapture(null);
     setCdlExtracted(null);
     setCdlValidation(null);
@@ -525,22 +607,31 @@ export default function CheckinPage() {
     setError(null);
   }
 
-  if (step === "edit-bol") {
+  if (step === "edit-doc") {
+    const editing = documents.find((doc) => doc.id === editingDocId);
+    const backToList = () => {
+      setEditingDocId(null);
+      setStep("documents");
+    };
     return (
       <div className="dp-shell">
-        <NavHeader onBack={() => setStep("input")} />
+        <NavHeader onBack={backToList} />
         <div className="dp-layout">
           <div className="dp-card">
             <h2 className="dp-section-title">Adjust Document Outline</h2>
-            <p className="dp-hint">Drag the corners to fit your document.</p>
-            {scanCapture ? (
+            <p className="dp-hint">
+              {editing
+                ? `Drag the corners to fit ${documentTypeLabel(editing.docType)}.`
+                : "Drag the corners to fit your document."}
+            </p>
+            {editing ? (
               <DocumentOutlinePreview
-                key={documentQuadKey(scanCapture.quadNormalized)}
-                rawDataUrl={scanCapture.rawDataUrl}
-                quad={scanCapture.quadNormalized}
+                key={documentQuadKey(editing.image.quadNormalized)}
+                rawDataUrl={editing.image.rawDataUrl}
+                quad={editing.image.quadNormalized}
                 editable
                 adjustDisabled={isProcessingImage}
-                onQuadCommit={reprocessScanWithQuad}
+                onQuadCommit={reprocessDocumentWithQuad}
               />
             ) : null}
             {error ? <p className="dp-error">{error}</p> : null}
@@ -550,20 +641,21 @@ export default function CheckinPage() {
                 type="button"
                 disabled={isProcessingImage}
                 onClick={() => {
-                  setScanCapture(null);
-                  setStep("input");
-                  setShowBolCamera(true);
+                  if (editing) {
+                    removeDocument(editing.id);
+                  }
+                  backToList();
                 }}
               >
-                Retake Photo
+                Cancel
               </button>
               <button
                 className="dp-continue-btn"
                 type="button"
                 disabled={isProcessingImage}
-                onClick={() => setStep("input")}
+                onClick={backToList}
               >
-                {isProcessingImage ? "Processing…" : "Save"}
+                {isProcessingImage ? "Processing…" : "Save Document"}
               </button>
             </div>
           </div>
@@ -622,7 +714,7 @@ export default function CheckinPage() {
   if (step === "cdl-scan") {
     return (
       <div className="dp-shell">
-        <NavHeader onBack={() => setStep("input")} />
+        <NavHeader onBack={() => setStep("documents")} />
         <div className="dp-layout">
           <div className="dp-card">
             <div className="dp-dockpass-logo">
@@ -787,15 +879,15 @@ export default function CheckinPage() {
               </p>
 
               {/* Clickable thumbnail */}
-              {scanCapture ? (
+              {analyzedDoc ? (
                 <button
                   className="dp-doc-preview dp-doc-preview-btn"
                   type="button"
-                  onClick={() => setViewerSrc(scanCapture.processedDataUrl)}
+                  onClick={() => setViewerSrc(analyzedDoc.image.processedDataUrl)}
                   aria-label="Open full-screen document preview"
                 >
                   <Image
-                    src={scanCapture.processedDataUrl}
+                    src={analyzedDoc.image.processedDataUrl}
                     alt="Processed document — tap to enlarge"
                     width={500}
                     height={700}
@@ -1007,6 +1099,127 @@ export default function CheckinPage() {
     );
   }
 
+  if (step === "documents") {
+    return (
+      <div className="dp-shell">
+        <NavHeader onBack={() => setStep("shipment-id")} />
+        <div className="dp-layout">
+          <div className="dp-card">
+            <div className="dp-dockpass-logo">
+              <Image src="/DockpassLogo.svg" alt="DockPass" width={334} height={59} style={{ width: "100%", height: 59 }} />
+            </div>
+
+            <h2 className="dp-section-title">Upload Documents</h2>
+            <p className="dp-hint">
+              Add the BOL or other shipment documents. Supported formats:{" "}
+              <strong>PNG, JPG</strong>, and <strong>PDF</strong> — max file size is{" "}
+              <strong>10 MB</strong>.
+            </p>
+
+            <div className="dp-camera-area">
+              <button
+                className="dp-camera-box"
+                type="button"
+                onClick={() => setShowBolCamera(true)}
+                disabled={isProcessingImage}
+                aria-label="Open camera to photograph a document"
+              >
+                {isProcessingImage ? <div className="dp-spinner" /> : <CameraIcon />}
+              </button>
+            </div>
+
+            <button
+              className="dp-frameless-btn"
+              type="button"
+              onClick={() => galleryInputRef.current?.click()}
+              disabled={isProcessingImage}
+            >
+              Select a photo from camera roll
+            </button>
+
+            <button
+              className="dp-frameless-btn"
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isProcessingImage}
+            >
+              Select a file from the Phone
+            </button>
+
+            <input
+              ref={galleryInputRef}
+              type="file"
+              accept="image/*"
+              onChange={onDocumentFileChosen}
+              style={{ display: "none" }}
+            />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,application/pdf"
+              onChange={onDocumentFileChosen}
+              style={{ display: "none" }}
+            />
+
+            <DocumentList
+              documents={documents}
+              onRemove={removeDocument}
+              onOpen={(id) => {
+                const target = documents.find((doc) => doc.id === id);
+                // PDFs have no outline to adjust.
+                if (target && !target.fromPdf) {
+                  setEditingDocId(id);
+                  setStep("edit-doc");
+                }
+              }}
+              disabled={isProcessingImage}
+            />
+
+            {documents.some((doc) => doc.fromPdf && (doc.pageCount ?? 1) > 1) ? (
+              <p className="dp-doc-pdf-note">
+                Only the first page of a multi-page PDF is read.
+              </p>
+            ) : null}
+
+            {showBolCamera ? (
+              <CameraCapture
+                title="document"
+                onDocumentReady={(result) => {
+                  setShowBolCamera(false);
+                  setPendingIntake({ kind: "capture", image: result });
+                }}
+                onClose={() => setShowBolCamera(false)}
+              />
+            ) : null}
+
+            {pendingIntake ? (
+              <DocumentTypeSheet
+                fileName={pendingIntake.kind === "file" ? pendingIntake.file.name : undefined}
+                onSelect={onDocumentTypeChosen}
+                onCancel={() => setPendingIntake(null)}
+              />
+            ) : null}
+
+            {error ? <p className="dp-error">{error}</p> : null}
+
+            <div className="dp-continue-area">
+              <button
+                className="dp-continue-btn"
+                type="button"
+                onClick={handleDocumentsContinue}
+                disabled={isProcessingImage}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="dp-home-indicator" />
+      </div>
+    );
+  }
+
+  // ── Step 1: Shipment ID on its own screen. Required before continuing.
   return (
     <div className="dp-shell">
       <NavHeader onBack={() => router.push("/")} />
@@ -1016,7 +1229,7 @@ export default function CheckinPage() {
             <Image src="/DockpassLogo.svg" alt="DockPass" width={334} height={59} style={{ width: "100%", height: 59 }} />
           </div>
 
-          <h2 className="dp-section-title">Last 5 digits of the Shipment ID</h2>
+          <h2 className="dp-section-title">Last 5 characters of the Shipment ID</h2>
 
           <div className="dp-otp-row">
             {digits.map((digit, i) => (
@@ -1030,7 +1243,7 @@ export default function CheckinPage() {
                 value={digit}
                 onChange={(e) => handleDigitChange(i, e)}
                 onKeyDown={(e) => handleDigitKeyDown(i, e)}
-                aria-label={`Digit ${i + 1} of 5`}
+                aria-label={`Character ${i + 1} of 5`}
               />
             ))}
           </div>
@@ -1040,83 +1253,14 @@ export default function CheckinPage() {
             any other reference number you have available.
           </p>
 
-          <div className="dp-or-divider">
-            <span className="dp-or-line" />
-            <span className="dp-or-text">or</span>
-            <span className="dp-or-line" />
-          </div>
-
-          <h2 className="dp-section-title">Upload BOL</h2>
-          <p className="dp-hint">
-            Snap a photo or choose from your camera roll — we&apos;ll detect edges,
-            crop, and straighten the document the same way for both.
-          </p>
-
-          <div className="dp-camera-area">
-            <button
-              className="dp-camera-box"
-              type="button"
-              onClick={() => { if (scanCapture) { setStep("edit-bol"); } else { setShowBolCamera(true); } }}
-              disabled={isProcessingImage}
-              aria-label="Open camera to scan BOL"
-            >
-              {isProcessingImage ? (
-                <div className="dp-spinner" />
-              ) : scanCapture ? (
-                <Image
-                  src={scanCapture.processedDataUrl}
-                  alt="Captured document thumbnail"
-                  width={300}
-                  height={400}
-                  unoptimized
-                  style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4 }}
-                />
-              ) : (
-                <CameraIcon />
-              )}
-            </button>
-          </div>
-
-          <button
-            className="dp-frameless-btn"
-            type="button"
-            onClick={() => galleryInputRef.current?.click()}
-            disabled={isProcessingImage}
-          >
-            Select from camera roll
-          </button>
-
-          <input
-            ref={galleryInputRef}
-            type="file"
-            accept="image/*"
-            onChange={onFileInputChange}
-            style={{ display: "none" }}
-          />
-
-          {showBolCamera ? (
-            <CameraCapture
-              title="BOL document"
-              onDocumentReady={(result, source) => {
-                setScanCapture(result);
-                setDigits(["", "", "", "", ""]);
-                setShowBolCamera(false);
-                if (source === "upload") {
-                  setStep("edit-bol");
-                }
-              }}
-              onClose={() => setShowBolCamera(false)}
-            />
-          ) : null}
-
           {error ? <p className="dp-error">{error}</p> : null}
 
           <div className="dp-continue-area">
             <button
               className="dp-continue-btn"
               type="button"
-              onClick={handleContinue}
-              disabled={!canContinue}
+              onClick={handleShipmentIdContinue}
+              disabled={!canContinueShipment}
             >
               Continue
             </button>

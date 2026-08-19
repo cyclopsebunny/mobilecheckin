@@ -14,6 +14,13 @@ export interface ProcessedImageResult {
 
 export interface PreprocessOptions {
   quadHintNormalized?: DocumentQuad;
+  /**
+   * Skip detection and perspective correction entirely, keeping the source
+   * pixels as they are. Used for rasterised PDF pages: they are already flat and
+   * axis-aligned, so warping them only resamples (and slightly distorts) a clean
+   * image. Contrast stretch and sharpening still run.
+   */
+  skipPerspective?: boolean;
 }
 
 function toGrayscaleArray(
@@ -789,10 +796,17 @@ export async function preprocessDocumentImage(
 ): Promise<ProcessedImageResult> {
   const sourceCanvas = await drawBlobToCanvas(capturedBlob);
   const rawDataUrl = sourceCanvas.toDataURL("image/jpeg", 0.95);
-  const { canvas: corrected, normalizedQuad: quadNormalized } = perspectiveCorrect(
-    sourceCanvas,
-    options?.quadHintNormalized
-  );
+  const { canvas: corrected, normalizedQuad: quadNormalized } = options?.skipPerspective
+    ? {
+        canvas: sourceCanvas,
+        normalizedQuad: [
+          { x: 0, y: 0 },
+          { x: 1, y: 0 },
+          { x: 1, y: 1 },
+          { x: 0, y: 1 }
+        ] as DocumentQuad
+      }
+    : perspectiveCorrect(sourceCanvas, options?.quadHintNormalized);
   const enhanced = enhanceContrastBrightness(corrected);
   const sharpened = unsharpMask(enhanced);
   const processedDataUrl = sharpened.toDataURL("image/jpeg", 0.97);
