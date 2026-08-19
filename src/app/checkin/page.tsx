@@ -19,6 +19,7 @@ import { LicenseIcon, TrashIcon } from "@/components/checkin/icons";
 import { dataUrlToBlob } from "@/lib/image/dataUrl";
 import { buildUploadedDocument, UploadRejected } from "@/lib/documents/intake";
 import { preprocessDocumentImage, type DocumentQuad, type ProcessedImageResult } from "@/lib/image/preprocess";
+import { clearCaptures, readCaptures, stashCaptures } from "@/lib/checkin/captureStash";
 import { saveGrantedSnapshot } from "@/lib/checkin/resultSnapshot";
 import { matchAppointment } from "@/lib/matching/matchAppointment";
 import { getMissingRequiredPrompts } from "@/lib/validation/requiredFields";
@@ -235,6 +236,13 @@ export default function CheckinPage() {
       };
       setPayload(saved.payload);
       setFieldConfidence(saved.fieldConfidence ?? {});
+      // The images are too large for sessionStorage, so they ride along in a
+      // module-level stash that survives the client-side navigation.
+      const captures = readCaptures();
+      if (captures) {
+        setDocuments(captures.documents);
+        setCdlCapture(captures.cdlCapture);
+      }
       setStep("review");
     } catch {
       // ignore corrupt data
@@ -464,9 +472,10 @@ export default function CheckinPage() {
     setError(null);
     try {
       const processed = await preprocessDocumentImage(file);
-      // Stay on this screen so the licence can be reviewed or removed before
-      // continuing — the crop editor is reachable by tapping the row.
       setCdlCapture(processed);
+      // Detection on a licence is often wrong, so show the outline for
+      // confirmation before returning to the CDL screen.
+      setStep("edit-cdl");
     } catch {
       setError("Could not process the CDL image. Please try again.");
     } finally {
@@ -603,6 +612,7 @@ export default function CheckinPage() {
         "checkin_review_resume",
         JSON.stringify({ payload, fieldConfidence })
       );
+      stashCaptures({ documents, cdlCapture });
       router.push("/checkin/result?status=contact");
     }
   }
@@ -613,6 +623,7 @@ export default function CheckinPage() {
     setShowBolCamera(false);
     setShowCdlCamera(false);
     setDocuments([]);
+    clearCaptures();
     setPendingSource(null);
     pendingTypeRef.current = null;
     setEditingDocId(null);
@@ -713,10 +724,9 @@ export default function CheckinPage() {
                 onClick={() => {
                   setCdlCapture(null);
                   setStep("cdl-scan");
-                  setShowCdlCamera(true);
                 }}
               >
-                Retake Photo
+                Cancel
               </button>
               <button
                 className="dp-continue-btn"
@@ -724,7 +734,7 @@ export default function CheckinPage() {
                 disabled={isProcessingCdl}
                 onClick={() => setStep("cdl-scan")}
               >
-                {isProcessingCdl ? "Processing…" : "Save"}
+                {isProcessingCdl ? "Processing…" : "Save License"}
               </button>
             </div>
           </div>
@@ -834,6 +844,7 @@ export default function CheckinPage() {
                 onDocumentReady={(result) => {
                   setCdlCapture(result);
                   setShowCdlCamera(false);
+                  setStep("edit-cdl");
                 }}
                 onClose={() => setShowCdlCamera(false)}
               />
