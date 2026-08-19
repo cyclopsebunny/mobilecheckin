@@ -58,6 +58,16 @@ function boxBlur(src: Uint8ClampedArray, width: number, height: number, radius: 
   return out;
 }
 
+/** Whole frame — used when we are not confident enough to crop at all. */
+function fullFrameQuad(width: number, height: number): DocumentQuad {
+  return [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: width, y: height },
+    { x: 0, y: height }
+  ];
+}
+
 function fallbackInsetQuad(width: number, height: number): DocumentQuad {
   const marginX = Math.round(width * 0.06);
   const marginY = Math.round(height * 0.06);
@@ -363,6 +373,28 @@ export function detectDocumentQuad(imageData: ImageData): DocumentQuad {
 
   if (bestLabel === -1) {
     return fallbackInsetQuad(width, height);
+  }
+
+  // Confidence gate. Everything above assumes a bright, solid document against a
+  // darker background. A laminated ID card photographed filling the frame breaks
+  // that: holographic texture and dense print scatter the bright pixels, so the
+  // winning component is a ragged partial patch rather than the card. Measured on
+  // a real licence photo it covered 67% of the frame with only ~32% of pixels —
+  // solidity ~0.48, where a genuine document scores 0.85-0.95.
+  //
+  // A confident-but-wrong crop is worse than no crop: it silently removes fields
+  // the extractor needs. When the winner does not look like a document boundary,
+  // keep the whole frame and let the driver adjust the corners.
+  const bestBounds = bounds.get(bestLabel);
+  const bestSize = sizes.get(bestLabel) ?? 0;
+  if (bestBounds) {
+    const bboxArea =
+      (bestBounds.maxX - bestBounds.minX + 1) * (bestBounds.maxY - bestBounds.minY + 1);
+    const bestSolidity = bboxArea > 0 ? bestSize / bboxArea : 0;
+    const MIN_CONFIDENT_SOLIDITY = 0.6;
+    if (bestSolidity < MIN_CONFIDENT_SOLIDITY) {
+      return fullFrameQuad(width, height);
+    }
   }
 
   // Find the 4 extreme corners of the chosen component using diagonal
