@@ -15,6 +15,7 @@ import { DocumentOutlinePreview, documentQuadKey } from "@/components/DocumentOu
 import { ImageViewer } from "@/components/ImageViewer";
 import { DocumentList } from "@/components/checkin/DocumentList";
 import { DocumentTypeSheet } from "@/components/checkin/DocumentTypeSheet";
+import { LicenseIcon, TrashIcon } from "@/components/checkin/icons";
 import { dataUrlToBlob } from "@/lib/image/dataUrl";
 import { buildUploadedDocument, UploadRejected } from "@/lib/documents/intake";
 import { preprocessDocumentImage, type DocumentQuad, type ProcessedImageResult } from "@/lib/image/preprocess";
@@ -44,14 +45,8 @@ type FlowStep =
   | "analyzing"
   | "review";
 
-/**
- * An upload waiting on its document type. Files still need processing; camera
- * captures are already processed (with a live edge-detection hint) and only
- * need filing.
- */
-type PendingIntake =
-  | { kind: "file"; file: File }
-  | { kind: "capture"; image: ProcessedImageResult };
+/** Where an about-to-be-added document will come from. */
+type UploadSource = "camera" | "gallery" | "file";
 
 interface FieldDef {
   key: keyof CheckinPayload;
@@ -195,8 +190,13 @@ export default function CheckinPage() {
   const [showBolCamera, setShowBolCamera] = useState(false);
   const [showCdlCamera, setShowCdlCamera] = useState(false);
   const [documents, setDocuments] = useState<UploadedDocument[]>([]);
-  /** Upload awaiting a document-type choice in the bottom sheet. */
-  const [pendingIntake, setPendingIntake] = useState<PendingIntake | null>(null);
+  /** Add-button that was tapped; non-null while the type sheet is on screen. */
+  const [pendingSource, setPendingSource] = useState<UploadSource | null>(null);
+  /**
+   * Type chosen for the upload now in flight. Mirrored in a ref because the
+   * file-input change event can arrive before React re-renders.
+   */
+  const pendingTypeRef = useRef<DocumentType | null>(null);
   /** Which document the outline editor is currently adjusting. */
   const [editingDocId, setEditingDocId] = useState<string | null>(null);
   const [cdlCapture, setCdlCapture] = useState<ProcessedImageResult | null>(null);
@@ -274,28 +274,49 @@ export default function CheckinPage() {
     }
   }
 
-  /** Intake step 1: hold the upload and ask what kind of document it is. */
-  function onDocumentFileChosen(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) {
-      return;
-    }
+  /**
+   * Intake step 1: the driver picked a type, so remember it and open the source
+   * they tapped. Called synchronously from the sheet so the click still counts
+   * as a user gesture — Safari refuses to open a file picker otherwise.
+   */
+  function startUpload(source: UploadSource, docType: DocumentType) {
     setError(null);
-    setPendingIntake({ kind: "file", file });
+    pendingTypeRef.current = docType;
+    if (source === "camera") {
+      setShowBolCamera(true);
+    } else if (source === "gallery") {
+      galleryInputRef.current?.click();
+    } else {
+      fileInputRef.current?.click();
+    }
   }
 
-  /**
-   * Intake step 2: the type is known, so process and file it. Uploads and
-   * captures both land here — the type decides whether we ever read the pixels.
-   */
-  async function onDocumentTypeChosen(docType: DocumentType) {
-    const intake = pendingIntake;
-    setPendingIntake(null);
-    if (!intake) {
+  /** Intake step 2a: a file came back from one of the pickers. */
+  async function onDocumentFileChosen(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    const docType = pendingTypeRef.current;
+    if (!file || !docType) {
       return;
     }
+    pendingTypeRef.current = null;
+    await addDocument(docType, { kind: "file", file });
+  }
 
+  /** Intake step 2b: a photo came back from the camera. */
+  async function onDocumentCaptured(image: ProcessedImageResult) {
+    const docType = pendingTypeRef.current;
+    if (!docType) {
+      return;
+    }
+    pendingTypeRef.current = null;
+    await addDocument(docType, { kind: "capture", image });
+  }
+
+  async function addDocument(
+    docType: DocumentType,
+    intake: { kind: "file"; file: File } | { kind: "capture"; image: ProcessedImageResult }
+  ) {
     setIsProcessingImage(true);
     setError(null);
     try {
@@ -443,9 +464,9 @@ export default function CheckinPage() {
     setError(null);
     try {
       const processed = await preprocessDocumentImage(file);
+      // Stay on this screen so the licence can be reviewed or removed before
+      // continuing — the crop editor is reachable by tapping the row.
       setCdlCapture(processed);
-      // Same as the BOL gallery path — confirm the crop before extraction.
-      setStep("edit-cdl");
     } catch {
       setError("Could not process the CDL image. Please try again.");
     } finally {
@@ -592,7 +613,8 @@ export default function CheckinPage() {
     setShowBolCamera(false);
     setShowCdlCamera(false);
     setDocuments([]);
-    setPendingIntake(null);
+    setPendingSource(null);
+    pendingTypeRef.current = null;
     setEditingDocId(null);
     setCdlCapture(null);
     setCdlExtracted(null);
@@ -731,9 +753,9 @@ export default function CheckinPage() {
               <button
                 className="dp-camera-box"
                 type="button"
-                onClick={() => { if (cdlCapture) { setStep("edit-cdl"); } else { setShowCdlCamera(true); } }}
+                onClick={() => (cdlCapture ? setStep("edit-cdl") : setShowCdlCamera(true))}
                 disabled={isProcessingCdl}
-                aria-label="Open camera to scan CDL"
+                aria-label={cdlCapture ? "Adjust the licence outline" : "Open camera to scan CDL"}
               >
                 {isProcessingCdl ? (
                   <div className="dp-spinner" />
@@ -778,15 +800,40 @@ export default function CheckinPage() {
               style={{ display: "none" }}
             />
 
+            {cdlCapture ? (
+              <ul className="dp-doc-list" aria-label="Captured driver's license">
+                <li className="dp-doc-row">
+                  <span className="dp-doc-row-icon">
+                    <LicenseIcon />
+                  </span>
+                  <button
+                    className="dp-doc-row-main"
+                    type="button"
+                    onClick={() => setStep("edit-cdl")}
+                    disabled={isProcessingCdl}
+                  >
+                    <span className="dp-doc-row-name">Driver&apos;s License</span>
+                  </button>
+                  <span className="dp-doc-row-type">Adjust</span>
+                  <button
+                    className="dp-doc-row-remove"
+                    type="button"
+                    onClick={() => setCdlCapture(null)}
+                    disabled={isProcessingCdl}
+                    aria-label="Remove driver's license"
+                  >
+                    <TrashIcon />
+                  </button>
+                </li>
+              </ul>
+            ) : null}
+
             {showCdlCamera ? (
               <CameraCapture
                 title="driver's license"
-                onDocumentReady={(result, source) => {
+                onDocumentReady={(result) => {
                   setCdlCapture(result);
                   setShowCdlCamera(false);
-                  if (source === "upload") {
-                    setStep("edit-cdl");
-                  }
                 }}
                 onClose={() => setShowCdlCamera(false)}
               />
@@ -794,22 +841,14 @@ export default function CheckinPage() {
 
             {error ? <p className="dp-error">{error}</p> : null}
 
-            <div className="dp-button-group">
+            <div className="dp-continue-area">
               <button
                 className="dp-continue-btn"
                 type="button"
                 onClick={handleCdlContinue}
                 disabled={isProcessingCdl}
               >
-                {cdlCapture ? "Continue" : "Continue"}
-              </button>
-              <button
-                className="dp-frameless-btn"
-                type="button"
-                onClick={handleCdlContinue}
-                disabled={isProcessingCdl}
-              >
-                Skip CDL scan
+                {cdlCapture ? "Continue" : "Skip"}
               </button>
             </div>
           </div>
@@ -866,7 +905,7 @@ export default function CheckinPage() {
         ) : null}
 
         <div className="dp-shell">
-          <NavHeader onBack={resetFlow} />
+          <NavHeader onBack={() => setStep("cdl-scan")} />
           <div className="dp-layout">
             <div className="dp-card">
               <div className="dp-dockpass-logo">
@@ -1120,9 +1159,9 @@ export default function CheckinPage() {
               <button
                 className="dp-camera-box"
                 type="button"
-                onClick={() => setShowBolCamera(true)}
+                onClick={() => setPendingSource("camera")}
                 disabled={isProcessingImage}
-                aria-label="Open camera to photograph a document"
+                aria-label="Add a document with the camera"
               >
                 {isProcessingImage ? <div className="dp-spinner" /> : <CameraIcon />}
               </button>
@@ -1131,7 +1170,7 @@ export default function CheckinPage() {
             <button
               className="dp-frameless-btn"
               type="button"
-              onClick={() => galleryInputRef.current?.click()}
+              onClick={() => setPendingSource("gallery")}
               disabled={isProcessingImage}
             >
               Select a photo from camera roll
@@ -1140,7 +1179,7 @@ export default function CheckinPage() {
             <button
               className="dp-frameless-btn"
               type="button"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => setPendingSource("file")}
               disabled={isProcessingImage}
             >
               Select a file from the Phone
@@ -1186,17 +1225,19 @@ export default function CheckinPage() {
                 title="document"
                 onDocumentReady={(result) => {
                   setShowBolCamera(false);
-                  setPendingIntake({ kind: "capture", image: result });
+                  void onDocumentCaptured(result);
                 }}
-                onClose={() => setShowBolCamera(false)}
+                onClose={() => {
+                  setShowBolCamera(false);
+                  pendingTypeRef.current = null;
+                }}
               />
             ) : null}
 
-            {pendingIntake ? (
+            {pendingSource ? (
               <DocumentTypeSheet
-                fileName={pendingIntake.kind === "file" ? pendingIntake.file.name : undefined}
-                onSelect={onDocumentTypeChosen}
-                onCancel={() => setPendingIntake(null)}
+                onSelect={(docType) => startUpload(pendingSource, docType)}
+                onDismiss={() => setPendingSource(null)}
               />
             ) : null}
 
@@ -1209,7 +1250,7 @@ export default function CheckinPage() {
                 onClick={handleDocumentsContinue}
                 disabled={isProcessingImage}
               >
-                Continue
+                {documents.length === 0 ? "Skip" : "Continue"}
               </button>
             </div>
           </div>
