@@ -13,8 +13,13 @@ import { useRouter } from "next/navigation";
 import { CameraCapture } from "@/components/camera/CameraCapture";
 import { DocumentOutlinePreview, documentQuadKey } from "@/components/DocumentOutlinePreview";
 import { ImageViewer } from "@/components/ImageViewer";
+import { DocumentList } from "@/components/checkin/DocumentList";
+import { DocumentTypeSheet } from "@/components/checkin/DocumentTypeSheet";
+import { LicenseIcon, TrashIcon } from "@/components/checkin/icons";
 import { dataUrlToBlob } from "@/lib/image/dataUrl";
+import { buildUploadedDocument, UploadRejected } from "@/lib/documents/intake";
 import { preprocessDocumentImage, type DocumentQuad, type ProcessedImageResult } from "@/lib/image/preprocess";
+import { clearCaptures, readCaptures, stashCaptures } from "@/lib/checkin/captureStash";
 import { saveGrantedSnapshot } from "@/lib/checkin/resultSnapshot";
 import { matchAppointment } from "@/lib/matching/matchAppointment";
 import { getMissingRequiredPrompts } from "@/lib/validation/requiredFields";
@@ -25,8 +30,24 @@ import {
   type ExtractedCdlData,
   type RequiredFieldPrompt
 } from "@/types/checkin";
+import {
+  documentTypeLabel,
+  findAnalyzableDocument,
+  type DocumentType,
+  type UploadedDocument
+} from "@/types/documents";
 
-type FlowStep = "input" | "edit-bol" | "cdl-scan" | "edit-cdl" | "analyzing" | "review";
+type FlowStep =
+  | "shipment-id"
+  | "documents"
+  | "edit-doc"
+  | "cdl-scan"
+  | "edit-cdl"
+  | "analyzing"
+  | "review";
+
+/** Where an about-to-be-added document will come from. */
+type UploadSource = "camera" | "gallery" | "file";
 
 interface FieldDef {
   key: keyof CheckinPayload;
@@ -162,16 +183,33 @@ export default function CheckinPage() {
   const d4 = useRef<HTMLInputElement>(null);
   const digitRefs = [d0, d1, d2, d3, d4];
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const cdlGalleryRef = useRef<HTMLInputElement>(null);
 
   const [digits, setDigits] = useState(["", "", "", "", ""]);
-  const [step, setStep] = useState<FlowStep>("input");
+  const [step, setStep] = useState<FlowStep>("shipment-id");
   const [showBolCamera, setShowBolCamera] = useState(false);
   const [showCdlCamera, setShowCdlCamera] = useState(false);
-  const [scanCapture, setScanCapture] = useState<ProcessedImageResult | null>(null);
+  const [documents, setDocuments] = useState<UploadedDocument[]>([]);
+  /** Add-button that was tapped; non-null while the type sheet is on screen. */
+  const [pendingSource, setPendingSource] = useState<UploadSource | null>(null);
+  /**
+   * Type chosen for the upload now in flight. Mirrored in a ref because the
+   * file-input change event can arrive before React re-renders.
+   */
+  const pendingTypeRef = useRef<DocumentType | null>(null);
+  /** Which document the outline editor is currently adjusting. */
+  const [editingDocId, setEditingDocId] = useState<string | null>(null);
   const [cdlCapture, setCdlCapture] = useState<ProcessedImageResult | null>(null);
   const [cdlExtracted, setCdlExtracted] = useState<ExtractedCdlData | null>(null);
   const [cdlValidation, setCdlValidation] = useState<CdlValidation | null>(null);
+  /**
+   * The CDL check needs a real state machine, not "validation is still null".
+   * Any failure — non-OK response, missing validation, network error, timeout —
+   * must land on "failed" so the badge stops spinning and offers a retry.
+   */
+  const [cdlCheck, setCdlCheck] = useState<"idle" | "checking" | "done" | "failed">("idle");
+  const [cdlCheckError, setCdlCheckError] = useState<string | null>(null);
   const [isProcessingImage, setIsProcessingImage] = useState(false);
   const [isProcessingCdl, setIsProcessingCdl] = useState(false);
   const [payload, setPayload] = useState<Partial<CheckinPayload>>({});
@@ -184,11 +222,11 @@ export default function CheckinPage() {
   const [viewerSrc, setViewerSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const scanCaptureRef = useRef<ProcessedImageResult | null>(null);
+  const documentsRef = useRef<UploadedDocument[]>([]);
   const cdlCaptureRef = useRef<ProcessedImageResult | null>(null);
   useEffect(() => {
-    scanCaptureRef.current = scanCapture;
-  }, [scanCapture]);
+    documentsRef.current = documents;
+  }, [documents]);
   useEffect(() => {
     cdlCaptureRef.current = cdlCapture;
   }, [cdlCapture]);
@@ -205,6 +243,17 @@ export default function CheckinPage() {
       };
       setPayload(saved.payload);
       setFieldConfidence(saved.fieldConfidence ?? {});
+      // The images are too large for sessionStorage, so they ride along in a
+      // module-level stash that survives the client-side navigation.
+      const captures = readCaptures();
+      if (captures) {
+        setDocuments(captures.documents);
+        setCdlCapture(captures.cdlCapture);
+        setCdlExtracted(captures.cdlExtracted);
+        setCdlValidation(captures.cdlValidation);
+        // Only claim "done" if a result actually came back before we left.
+        setCdlCheck(captures.cdlValidation ? "done" : "idle");
+      }
       setStep("review");
     } catch {
       // ignore corrupt data
@@ -218,7 +267,11 @@ export default function CheckinPage() {
 
   const reference = digits.join("").replace(/\s/g, "");
   const hasReference = reference.length === 5;
-  const canContinue = (hasReference || scanCapture !== null) && !isProcessingImage;
+  // Shipment ID is required to leave the first screen. Documents are optional —
+  // an uploaded BOL enriches the match but never gates it.
+  const canContinueShipment = hasReference && !isProcessingImage;
+  /** The one document we extract from: the first Bill of Lading, if any. */
+  const analyzedDoc = findAnalyzableDocument(documents);
 
   function handleDigitChange(index: number, event: ChangeEvent<HTMLInputElement>) {
     const val = event.target.value.replace(/[^a-zA-Z0-9]/g, "").slice(-1).toUpperCase();
@@ -240,43 +293,108 @@ export default function CheckinPage() {
     }
   }
 
-  async function handleFileSelected(file: File) {
+  /**
+   * Intake step 1: the driver picked a type, so remember it and open the source
+   * they tapped. Called synchronously from the sheet so the click still counts
+   * as a user gesture — Safari refuses to open a file picker otherwise.
+   */
+  function startUpload(source: UploadSource, docType: DocumentType) {
+    setError(null);
+    pendingTypeRef.current = docType;
+    if (source === "camera") {
+      setShowBolCamera(true);
+    } else if (source === "gallery") {
+      galleryInputRef.current?.click();
+    } else {
+      fileInputRef.current?.click();
+    }
+  }
+
+  /** Intake step 2a: a file came back from one of the pickers. */
+  async function onDocumentFileChosen(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    const docType = pendingTypeRef.current;
+    if (!file || !docType) {
+      return;
+    }
+    pendingTypeRef.current = null;
+    await addDocument(docType, { kind: "file", file });
+  }
+
+  /** Intake step 2b: a photo came back from the camera. */
+  async function onDocumentCaptured(image: ProcessedImageResult) {
+    const docType = pendingTypeRef.current;
+    if (!docType) {
+      return;
+    }
+    pendingTypeRef.current = null;
+    await addDocument(docType, { kind: "capture", image });
+  }
+
+  async function addDocument(
+    docType: DocumentType,
+    intake: { kind: "file"; file: File } | { kind: "capture"; image: ProcessedImageResult }
+  ) {
     setIsProcessingImage(true);
     setError(null);
     try {
-      const processed = await preprocessDocumentImage(file);
-      setScanCapture(processed);
-      setDigits(["", "", "", "", ""]);
-      // Gallery images get no live detection hint, so edge detection is a rough
-      // first guess — send the driver straight to the crop-adjust view to confirm.
-      setStep("edit-bol");
-    } catch {
-      setError("Could not process the image. Please try again.");
+      let doc: UploadedDocument;
+      if (intake.kind === "file") {
+        doc = await buildUploadedDocument(intake.file, docType);
+      } else {
+        // Already processed by CameraCapture with a live detection hint.
+        doc = {
+          id: crypto.randomUUID(),
+          fileName: `capture-${documents.length + 1}.jpg`,
+          docType,
+          sizeBytes: intake.image.processedDataUrl.length,
+          fromPdf: false,
+          image: intake.image
+        };
+      }
+      setDocuments((prev) => [...prev, doc]);
+
+      // Confirm the crop for anything with a real scene in it. A rasterised PDF
+      // page is already flat and deskewed, so there is nothing to adjust.
+      if (!doc.fromPdf) {
+        setEditingDocId(doc.id);
+        setStep("edit-doc");
+      }
+    } catch (ex) {
+      setError(
+        ex instanceof UploadRejected
+          ? ex.message
+          : "Could not process that file. Please try again."
+      );
     } finally {
       setIsProcessingImage(false);
     }
   }
 
-  async function onFileInputChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
+  function removeDocument(id: string) {
+    setDocuments((prev) => prev.filter((doc) => doc.id !== id));
+    if (editingDocId === id) {
+      setEditingDocId(null);
     }
-    await handleFileSelected(file);
-    event.target.value = "";
   }
 
-  async function handleContinue() {
+  function handleShipmentIdContinue() {
     setError(null);
-    // Both manual and scan flows go to CDL scan step first
+    setStep("documents");
+  }
+
+  function handleDocumentsContinue() {
+    setError(null);
     setStep("cdl-scan");
   }
 
   async function handleCdlContinue() {
     setError(null);
 
-    if (hasReference && !scanCapture) {
-      // Manual reference path — match now
+    if (!analyzedDoc) {
+      // No Bill of Lading attached — match on the Shipment ID alone. Invoices and
+      // packing lists are deliberately never read, so they cannot fill this in.
       const result = matchAppointment({
         method: "manual",
         referenceLast5: reference.toUpperCase()
@@ -295,13 +413,13 @@ export default function CheckinPage() {
       return;
     }
 
-    if (scanCapture) {
+    if (analyzedDoc) {
       setStep("analyzing");
       try {
         const response = await fetch("/api/extract-document", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageDataUrl: scanCapture.processedDataUrl })
+          body: JSON.stringify({ imageDataUrl: analyzedDoc.image.processedDataUrl })
         });
         const json = (await response.json()) as {
           extracted?: Partial<CheckinPayload>;
@@ -319,32 +437,7 @@ export default function CheckinPage() {
 
         // Fire CDL verification if we captured one
         if (cdlCapture) {
-          fetch("/api/extract-cdl", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              imageDataUrl: cdlCapture.processedDataUrl,
-              driverName: nextPayload.driverName
-            })
-          })
-            .then((r) => r.json() as Promise<{ extracted?: ExtractedCdlData; validation?: CdlValidation }>)
-            .then((data) => {
-              if (data.extracted) {
-                setCdlExtracted(data.extracted);
-                // Merge CDL fields into payload where BOL left gaps
-                setPayload((prev) => {
-                  const merged = { ...prev };
-                  if (!merged.driverName && data.extracted?.fullName) {
-                    merged.driverName = data.extracted.fullName;
-                  }
-                  // Recompute missing prompts with the merged payload
-                  setMissingPrompts(getMissingRequiredPrompts(merged as CheckinPayload));
-                  return merged;
-                });
-              }
-              if (data.validation) setCdlValidation(data.validation);
-            })
-            .catch(() => {/* non-fatal */});
+          verifyCdl(cdlCapture.processedDataUrl, nextPayload.driverName);
         }
 
         // Fire carrier verification in the background if we have a carrier name
@@ -355,7 +448,7 @@ export default function CheckinPage() {
         setStep("review");
       } catch (ex) {
         setError(ex instanceof Error ? ex.message : "Extraction failed.");
-        setStep("input");
+        setStep("documents");
       }
     }
   }
@@ -366,7 +459,8 @@ export default function CheckinPage() {
     try {
       const processed = await preprocessDocumentImage(file);
       setCdlCapture(processed);
-      // Same as the BOL gallery path — confirm the crop before extraction.
+      // Detection on a licence is often wrong, so show the outline for
+      // confirmation before returning to the CDL screen.
       setStep("edit-cdl");
     } catch {
       setError("Could not process the CDL image. Please try again.");
@@ -381,6 +475,74 @@ export default function CheckinPage() {
     await handleCdlFileSelected(file);
     event.target.value = "";
   }
+
+  const verifyCdl = useCallback((imageDataUrl: string, driverName?: string) => {
+    setCdlCheck("checking");
+    setCdlCheckError(null);
+    setCdlValidation(null);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 45_000);
+
+    fetch("/api/extract-cdl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageDataUrl, driverName }),
+      signal: controller.signal
+    })
+      .then(async (response) => {
+        // Read as text first so a response without a verdict can be reported
+        // verbatim — "no verdict" alone gives nothing to debug with.
+        const bodyText = await response.text();
+        let data: {
+          extracted?: ExtractedCdlData;
+          validation?: CdlValidation;
+          error?: string;
+        } = {};
+        let readable = true;
+        try {
+          data = JSON.parse(bodyText);
+        } catch {
+          readable = false;
+        }
+        if (!response.ok) {
+          throw new Error(data.error ?? `The CDL check failed (HTTP ${response.status}).`);
+        }
+        if (!data.validation) {
+          const excerpt = bodyText.trim().slice(0, 140) || "(empty body)";
+          throw new Error(
+            `${readable ? "No verdict" : "Unreadable response"} from the CDL check ` +
+              `(HTTP ${response.status}). Server said: ${excerpt}`
+          );
+        }
+        if (data.extracted) {
+          setCdlExtracted(data.extracted);
+          // Merge CDL fields into the payload where the BOL left gaps
+          setPayload((prev) => {
+            const merged = { ...prev };
+            if (!merged.driverName && data.extracted?.fullName) {
+              merged.driverName = data.extracted.fullName;
+            }
+            setMissingPrompts(getMissingRequiredPrompts(merged as CheckinPayload));
+            return merged;
+          });
+        }
+        setCdlValidation(data.validation);
+        setCdlCheck("done");
+      })
+      .catch((ex: unknown) => {
+        const aborted = ex instanceof DOMException && ex.name === "AbortError";
+        setCdlCheckError(
+          aborted
+            ? "The CDL check timed out."
+            : ex instanceof Error
+              ? ex.message
+              : "The CDL check could not be completed."
+        );
+        setCdlCheck("failed");
+      })
+      .finally(() => window.clearTimeout(timeout));
+  }, []);
 
   const verifyCarrier = useCallback((name: string) => {
     if (!name.trim()) return;
@@ -428,20 +590,22 @@ export default function CheckinPage() {
     });
   }
 
-  async function reprocessScanWithQuad(nextQuad: DocumentQuad) {
-    const prev = scanCaptureRef.current;
-    if (!prev) {
+  async function reprocessDocumentWithQuad(nextQuad: DocumentQuad) {
+    const target = documentsRef.current.find((doc) => doc.id === editingDocId);
+    if (!target) {
       return;
     }
     setIsProcessingImage(true);
     setError(null);
     try {
-      const blob = await dataUrlToBlob(prev.rawDataUrl);
+      const blob = await dataUrlToBlob(target.image.rawDataUrl);
       const processed = await preprocessDocumentImage(blob, {
         quadHintNormalized: nextQuad
       });
       const savedScroll = window.scrollY;
-      setScanCapture(processed);
+      setDocuments((prev) =>
+        prev.map((doc) => (doc.id === target.id ? { ...doc, image: processed } : doc))
+      );
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           window.scrollTo({ top: savedScroll, behavior: "instant" });
@@ -502,19 +666,26 @@ export default function CheckinPage() {
         "checkin_review_resume",
         JSON.stringify({ payload, fieldConfidence })
       );
+      stashCaptures({ documents, cdlCapture, cdlExtracted, cdlValidation });
       router.push("/checkin/result?status=contact");
     }
   }
 
   function resetFlow() {
-    setStep("input");
+    setStep("shipment-id");
     setDigits(["", "", "", "", ""]);
     setShowBolCamera(false);
     setShowCdlCamera(false);
-    setScanCapture(null);
+    setDocuments([]);
+    clearCaptures();
+    setPendingSource(null);
+    pendingTypeRef.current = null;
+    setEditingDocId(null);
     setCdlCapture(null);
     setCdlExtracted(null);
     setCdlValidation(null);
+    setCdlCheck("idle");
+    setCdlCheckError(null);
     setPayload({});
     setMissingPrompts([]);
     setCarrierVerification(null);
@@ -525,22 +696,31 @@ export default function CheckinPage() {
     setError(null);
   }
 
-  if (step === "edit-bol") {
+  if (step === "edit-doc") {
+    const editing = documents.find((doc) => doc.id === editingDocId);
+    const backToList = () => {
+      setEditingDocId(null);
+      setStep("documents");
+    };
     return (
       <div className="dp-shell">
-        <NavHeader onBack={() => setStep("input")} />
+        <NavHeader onBack={backToList} />
         <div className="dp-layout">
           <div className="dp-card">
             <h2 className="dp-section-title">Adjust Document Outline</h2>
-            <p className="dp-hint">Drag the corners to fit your document.</p>
-            {scanCapture ? (
+            <p className="dp-hint">
+              {editing
+                ? `Drag the corners to fit ${documentTypeLabel(editing.docType)}.`
+                : "Drag the corners to fit your document."}
+            </p>
+            {editing ? (
               <DocumentOutlinePreview
-                key={documentQuadKey(scanCapture.quadNormalized)}
-                rawDataUrl={scanCapture.rawDataUrl}
-                quad={scanCapture.quadNormalized}
+                key={documentQuadKey(editing.image.quadNormalized)}
+                rawDataUrl={editing.image.rawDataUrl}
+                quad={editing.image.quadNormalized}
                 editable
                 adjustDisabled={isProcessingImage}
-                onQuadCommit={reprocessScanWithQuad}
+                onQuadCommit={reprocessDocumentWithQuad}
               />
             ) : null}
             {error ? <p className="dp-error">{error}</p> : null}
@@ -550,20 +730,21 @@ export default function CheckinPage() {
                 type="button"
                 disabled={isProcessingImage}
                 onClick={() => {
-                  setScanCapture(null);
-                  setStep("input");
-                  setShowBolCamera(true);
+                  if (editing) {
+                    removeDocument(editing.id);
+                  }
+                  backToList();
                 }}
               >
-                Retake Photo
+                Cancel
               </button>
               <button
                 className="dp-continue-btn"
                 type="button"
                 disabled={isProcessingImage}
-                onClick={() => setStep("input")}
+                onClick={backToList}
               >
-                {isProcessingImage ? "Processing…" : "Save"}
+                {isProcessingImage ? "Processing…" : "Save Document"}
               </button>
             </div>
           </div>
@@ -599,10 +780,9 @@ export default function CheckinPage() {
                 onClick={() => {
                   setCdlCapture(null);
                   setStep("cdl-scan");
-                  setShowCdlCamera(true);
                 }}
               >
-                Retake Photo
+                Cancel
               </button>
               <button
                 className="dp-continue-btn"
@@ -610,7 +790,7 @@ export default function CheckinPage() {
                 disabled={isProcessingCdl}
                 onClick={() => setStep("cdl-scan")}
               >
-                {isProcessingCdl ? "Processing…" : "Save"}
+                {isProcessingCdl ? "Processing…" : "Save License"}
               </button>
             </div>
           </div>
@@ -622,7 +802,7 @@ export default function CheckinPage() {
   if (step === "cdl-scan") {
     return (
       <div className="dp-shell">
-        <NavHeader onBack={() => setStep("input")} />
+        <NavHeader onBack={() => setStep("documents")} />
         <div className="dp-layout">
           <div className="dp-card">
             <div className="dp-dockpass-logo">
@@ -639,9 +819,9 @@ export default function CheckinPage() {
               <button
                 className="dp-camera-box"
                 type="button"
-                onClick={() => { if (cdlCapture) { setStep("edit-cdl"); } else { setShowCdlCamera(true); } }}
+                onClick={() => (cdlCapture ? setStep("edit-cdl") : setShowCdlCamera(true))}
                 disabled={isProcessingCdl}
-                aria-label="Open camera to scan CDL"
+                aria-label={cdlCapture ? "Adjust the licence outline" : "Open camera to scan CDL"}
               >
                 {isProcessingCdl ? (
                   <div className="dp-spinner" />
@@ -686,15 +866,41 @@ export default function CheckinPage() {
               style={{ display: "none" }}
             />
 
+            {cdlCapture ? (
+              <ul className="dp-doc-list" aria-label="Captured driver's license">
+                <li className="dp-doc-row">
+                  <span className="dp-doc-row-icon">
+                    <LicenseIcon />
+                  </span>
+                  <button
+                    className="dp-doc-row-main"
+                    type="button"
+                    onClick={() => setStep("edit-cdl")}
+                    disabled={isProcessingCdl}
+                  >
+                    <span className="dp-doc-row-name">Driver&apos;s License</span>
+                  </button>
+                  <span className="dp-doc-row-type">Adjust</span>
+                  <button
+                    className="dp-doc-row-remove"
+                    type="button"
+                    onClick={() => setCdlCapture(null)}
+                    disabled={isProcessingCdl}
+                    aria-label="Remove driver's license"
+                  >
+                    <TrashIcon />
+                  </button>
+                </li>
+              </ul>
+            ) : null}
+
             {showCdlCamera ? (
               <CameraCapture
                 title="driver's license"
-                onDocumentReady={(result, source) => {
+                onDocumentReady={(result) => {
                   setCdlCapture(result);
                   setShowCdlCamera(false);
-                  if (source === "upload") {
-                    setStep("edit-cdl");
-                  }
+                  setStep("edit-cdl");
                 }}
                 onClose={() => setShowCdlCamera(false)}
               />
@@ -702,22 +908,14 @@ export default function CheckinPage() {
 
             {error ? <p className="dp-error">{error}</p> : null}
 
-            <div className="dp-button-group">
+            <div className="dp-continue-area">
               <button
                 className="dp-continue-btn"
                 type="button"
                 onClick={handleCdlContinue}
                 disabled={isProcessingCdl}
               >
-                {cdlCapture ? "Continue" : "Continue"}
-              </button>
-              <button
-                className="dp-frameless-btn"
-                type="button"
-                onClick={handleCdlContinue}
-                disabled={isProcessingCdl}
-              >
-                Skip CDL scan
+                {cdlCapture ? "Continue" : "Skip"}
               </button>
             </div>
           </div>
@@ -774,7 +972,7 @@ export default function CheckinPage() {
         ) : null}
 
         <div className="dp-shell">
-          <NavHeader onBack={resetFlow} />
+          <NavHeader onBack={() => setStep("cdl-scan")} />
           <div className="dp-layout">
             <div className="dp-card">
               <div className="dp-dockpass-logo">
@@ -787,15 +985,15 @@ export default function CheckinPage() {
               </p>
 
               {/* Clickable thumbnail */}
-              {scanCapture ? (
+              {analyzedDoc ? (
                 <button
                   className="dp-doc-preview dp-doc-preview-btn"
                   type="button"
-                  onClick={() => setViewerSrc(scanCapture.processedDataUrl)}
+                  onClick={() => setViewerSrc(analyzedDoc.image.processedDataUrl)}
                   aria-label="Open full-screen document preview"
                 >
                   <Image
-                    src={scanCapture.processedDataUrl}
+                    src={analyzedDoc.image.processedDataUrl}
                     alt="Processed document — tap to enlarge"
                     width={500}
                     height={700}
@@ -951,7 +1149,7 @@ export default function CheckinPage() {
                 </div>
               ) : null}
 
-              {cdlCapture && (cdlValidation ? (
+              {cdlCapture && cdlCheck === "done" && cdlValidation ? (
                 <div className={`dp-carrier-badge dp-carrier-${cdlValidation.alertLevel}`} role="status">
                   <span className="dp-carrier-icon">
                     {cdlValidation.alertLevel === "clear" ? "✓" : cdlValidation.alertLevel === "warn" ? "⚠" : "✕"}
@@ -967,12 +1165,31 @@ export default function CheckinPage() {
                     ) : null}
                   </div>
                 </div>
-              ) : (
-                <div className="dp-carrier-badge dp-carrier-checking">
+              ) : null}
+
+              {cdlCapture && cdlCheck === "checking" ? (
+                <div className="dp-carrier-badge dp-carrier-checking" role="status">
                   <div className="dp-carrier-spinner" />
                   <span>Verifying CDL…</span>
                 </div>
-              ))}
+              ) : null}
+
+              {cdlCapture && (cdlCheck === "failed" || cdlCheck === "idle") ? (
+                <div className="dp-carrier-badge dp-carrier-block" role="status">
+                  <span className="dp-carrier-icon">✕</span>
+                  <div className="dp-carrier-text">
+                    <strong>CDL not verified</strong>
+                    <span>{cdlCheckError ?? "The licence has not been checked yet."}</span>
+                    <button
+                      className="dp-carrier-retry"
+                      type="button"
+                      onClick={() => verifyCdl(cdlCapture.processedDataUrl, payload.driverName)}
+                    >
+                      Retry CDL check
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {missing.length > 0 ? (
                 <p className="dp-missing-banner" style={{ marginTop: "0.75rem" }}>
@@ -1007,6 +1224,129 @@ export default function CheckinPage() {
     );
   }
 
+  if (step === "documents") {
+    return (
+      <div className="dp-shell">
+        <NavHeader onBack={() => setStep("shipment-id")} />
+        <div className="dp-layout">
+          <div className="dp-card">
+            <div className="dp-dockpass-logo">
+              <Image src="/DockpassLogo.svg" alt="DockPass" width={334} height={59} style={{ width: "100%", height: 59 }} />
+            </div>
+
+            <h2 className="dp-section-title">Upload Documents</h2>
+            <p className="dp-hint">
+              Add the BOL or other shipment documents. Supported formats:{" "}
+              <strong>PNG, JPG</strong>, and <strong>PDF</strong> — max file size is{" "}
+              <strong>10 MB</strong>.
+            </p>
+
+            <div className="dp-camera-area">
+              <button
+                className="dp-camera-box"
+                type="button"
+                onClick={() => setPendingSource("camera")}
+                disabled={isProcessingImage}
+                aria-label="Add a document with the camera"
+              >
+                {isProcessingImage ? <div className="dp-spinner" /> : <CameraIcon />}
+              </button>
+            </div>
+
+            <button
+              className="dp-frameless-btn"
+              type="button"
+              onClick={() => setPendingSource("gallery")}
+              disabled={isProcessingImage}
+            >
+              Select a photo from camera roll
+            </button>
+
+            <button
+              className="dp-frameless-btn"
+              type="button"
+              onClick={() => setPendingSource("file")}
+              disabled={isProcessingImage}
+            >
+              Select a file from the Phone
+            </button>
+
+            <input
+              ref={galleryInputRef}
+              type="file"
+              accept="image/*"
+              onChange={onDocumentFileChosen}
+              style={{ display: "none" }}
+            />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,application/pdf"
+              onChange={onDocumentFileChosen}
+              style={{ display: "none" }}
+            />
+
+            <DocumentList
+              documents={documents}
+              onRemove={removeDocument}
+              onOpen={(id) => {
+                const target = documents.find((doc) => doc.id === id);
+                // PDFs have no outline to adjust.
+                if (target && !target.fromPdf) {
+                  setEditingDocId(id);
+                  setStep("edit-doc");
+                }
+              }}
+              disabled={isProcessingImage}
+            />
+
+            {documents.some((doc) => doc.fromPdf && (doc.pageCount ?? 1) > 1) ? (
+              <p className="dp-doc-pdf-note">
+                Only the first page of a multi-page PDF is read.
+              </p>
+            ) : null}
+
+            {showBolCamera ? (
+              <CameraCapture
+                title="document"
+                onDocumentReady={(result) => {
+                  setShowBolCamera(false);
+                  void onDocumentCaptured(result);
+                }}
+                onClose={() => {
+                  setShowBolCamera(false);
+                  pendingTypeRef.current = null;
+                }}
+              />
+            ) : null}
+
+            {pendingSource ? (
+              <DocumentTypeSheet
+                onSelect={(docType) => startUpload(pendingSource, docType)}
+                onDismiss={() => setPendingSource(null)}
+              />
+            ) : null}
+
+            {error ? <p className="dp-error">{error}</p> : null}
+
+            <div className="dp-continue-area">
+              <button
+                className="dp-continue-btn"
+                type="button"
+                onClick={handleDocumentsContinue}
+                disabled={isProcessingImage}
+              >
+                {documents.length === 0 ? "Skip" : "Continue"}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="dp-home-indicator" />
+      </div>
+    );
+  }
+
+  // ── Step 1: Shipment ID on its own screen. Required before continuing.
   return (
     <div className="dp-shell">
       <NavHeader onBack={() => router.push("/")} />
@@ -1016,7 +1356,7 @@ export default function CheckinPage() {
             <Image src="/DockpassLogo.svg" alt="DockPass" width={334} height={59} style={{ width: "100%", height: 59 }} />
           </div>
 
-          <h2 className="dp-section-title">Last 5 digits of the Shipment ID</h2>
+          <h2 className="dp-section-title">Last 5 characters of the Shipment ID</h2>
 
           <div className="dp-otp-row">
             {digits.map((digit, i) => (
@@ -1030,7 +1370,7 @@ export default function CheckinPage() {
                 value={digit}
                 onChange={(e) => handleDigitChange(i, e)}
                 onKeyDown={(e) => handleDigitKeyDown(i, e)}
-                aria-label={`Digit ${i + 1} of 5`}
+                aria-label={`Character ${i + 1} of 5`}
               />
             ))}
           </div>
@@ -1040,83 +1380,14 @@ export default function CheckinPage() {
             any other reference number you have available.
           </p>
 
-          <div className="dp-or-divider">
-            <span className="dp-or-line" />
-            <span className="dp-or-text">or</span>
-            <span className="dp-or-line" />
-          </div>
-
-          <h2 className="dp-section-title">Upload BOL</h2>
-          <p className="dp-hint">
-            Snap a photo or choose from your camera roll — we&apos;ll detect edges,
-            crop, and straighten the document the same way for both.
-          </p>
-
-          <div className="dp-camera-area">
-            <button
-              className="dp-camera-box"
-              type="button"
-              onClick={() => { if (scanCapture) { setStep("edit-bol"); } else { setShowBolCamera(true); } }}
-              disabled={isProcessingImage}
-              aria-label="Open camera to scan BOL"
-            >
-              {isProcessingImage ? (
-                <div className="dp-spinner" />
-              ) : scanCapture ? (
-                <Image
-                  src={scanCapture.processedDataUrl}
-                  alt="Captured document thumbnail"
-                  width={300}
-                  height={400}
-                  unoptimized
-                  style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4 }}
-                />
-              ) : (
-                <CameraIcon />
-              )}
-            </button>
-          </div>
-
-          <button
-            className="dp-frameless-btn"
-            type="button"
-            onClick={() => galleryInputRef.current?.click()}
-            disabled={isProcessingImage}
-          >
-            Select from camera roll
-          </button>
-
-          <input
-            ref={galleryInputRef}
-            type="file"
-            accept="image/*"
-            onChange={onFileInputChange}
-            style={{ display: "none" }}
-          />
-
-          {showBolCamera ? (
-            <CameraCapture
-              title="BOL document"
-              onDocumentReady={(result, source) => {
-                setScanCapture(result);
-                setDigits(["", "", "", "", ""]);
-                setShowBolCamera(false);
-                if (source === "upload") {
-                  setStep("edit-bol");
-                }
-              }}
-              onClose={() => setShowBolCamera(false)}
-            />
-          ) : null}
-
           {error ? <p className="dp-error">{error}</p> : null}
 
           <div className="dp-continue-area">
             <button
               className="dp-continue-btn"
               type="button"
-              onClick={handleContinue}
-              disabled={!canContinue}
+              onClick={handleShipmentIdContinue}
+              disabled={!canContinueShipment}
             >
               Continue
             </button>

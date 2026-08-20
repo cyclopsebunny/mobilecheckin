@@ -14,6 +14,13 @@ export interface ProcessedImageResult {
 
 export interface PreprocessOptions {
   quadHintNormalized?: DocumentQuad;
+  /**
+   * Skip detection and perspective correction entirely, keeping the source
+   * pixels as they are. Used for rasterised PDF pages: they are already flat and
+   * axis-aligned, so warping them only resamples (and slightly distorts) a clean
+   * image. Contrast stretch and sharpening still run.
+   */
+  skipPerspective?: boolean;
 }
 
 function toGrayscaleArray(
@@ -49,6 +56,16 @@ function boxBlur(src: Uint8ClampedArray, width: number, height: number, radius: 
     }
   }
   return out;
+}
+
+/** Whole frame — used when we are not confident enough to crop at all. */
+function fullFrameQuad(width: number, height: number): DocumentQuad {
+  return [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: width, y: height },
+    { x: 0, y: height }
+  ];
 }
 
 function fallbackInsetQuad(width: number, height: number): DocumentQuad {
@@ -215,9 +232,25 @@ export function detectDocumentQuad(imageData: ImageData): DocumentQuad {
   }
   mean /= blurred.length;
 
-  // Force the threshold above the mean so we are clearly selecting the
-  // brighter half (paper) even when Otsu finds a lower split.
-  const threshold = Math.max(otsu, Math.min(240, Math.round(mean + 25)));
+  // Nudge the threshold above the mean so we clearly select the brighter half
+  // (paper) even when Otsu finds a lower split.
+  let threshold = Math.max(otsu, Math.min(240, Math.round(mean + 25)));
+
+  // That nudge assumes the document is a minority of the frame. Held close to
+  // the camera it fills the frame, so the mean IS the document and mean+25
+  // thresholds the document out — leaving only specular glare, which then wins
+  // the scoring below because it does not touch the border. If almost nothing
+  // survives, the nudge was wrong for this photo; fall back to Otsu's split.
+  const MIN_FOREGROUND_FRACTION = 0.12;
+  let aboveThreshold = 0;
+  for (let i = 0; i < blurred.length; i += 1) {
+    if (blurred[i] >= threshold) {
+      aboveThreshold += 1;
+    }
+  }
+  if (aboveThreshold < blurred.length * MIN_FOREGROUND_FRACTION) {
+    threshold = otsu;
+  }
 
   const mask = new Uint8Array(width * height);
   const borderX = Math.max(2, Math.round(width * 0.02));
@@ -319,7 +352,11 @@ export function detectDocumentQuad(imageData: ImageData): DocumentQuad {
       bound.minY <= borderY + 1 ||
       bound.maxX >= width - borderX - 2 ||
       bound.maxY >= height - borderY - 2;
-    const edgePenalty = touchesEdge ? 0.3 : 0;
+    // The penalty is meant to reject wall/floor/table bleeding off the frame.
+    // A *solid* component running to the edge is almost always a document held
+    // close to the camera, so exempt it — otherwise filling the frame, which is
+    // what people naturally do, handicaps the real document.
+    const edgePenalty = touchesEdge && solidity < 0.75 ? 0.3 : 0;
 
     const score =
       sizeScore * 0.35 +
@@ -336,6 +373,28 @@ export function detectDocumentQuad(imageData: ImageData): DocumentQuad {
 
   if (bestLabel === -1) {
     return fallbackInsetQuad(width, height);
+  }
+
+  // Confidence gate. Everything above assumes a bright, solid document against a
+  // darker background. A laminated ID card photographed filling the frame breaks
+  // that: holographic texture and dense print scatter the bright pixels, so the
+  // winning component is a ragged partial patch rather than the card. Measured on
+  // a real licence photo it covered 67% of the frame with only ~32% of pixels —
+  // solidity ~0.48, where a genuine document scores 0.85-0.95.
+  //
+  // A confident-but-wrong crop is worse than no crop: it silently removes fields
+  // the extractor needs. When the winner does not look like a document boundary,
+  // keep the whole frame and let the driver adjust the corners.
+  const bestBounds = bounds.get(bestLabel);
+  const bestSize = sizes.get(bestLabel) ?? 0;
+  if (bestBounds) {
+    const bboxArea =
+      (bestBounds.maxX - bestBounds.minX + 1) * (bestBounds.maxY - bestBounds.minY + 1);
+    const bestSolidity = bboxArea > 0 ? bestSize / bboxArea : 0;
+    const MIN_CONFIDENT_SOLIDITY = 0.6;
+    if (bestSolidity < MIN_CONFIDENT_SOLIDITY) {
+      return fullFrameQuad(width, height);
+    }
   }
 
   // Find the 4 extreme corners of the chosen component using diagonal
@@ -676,6 +735,15 @@ function enhanceContrastBrightness(canvas: HTMLCanvasElement): HTMLCanvasElement
     if (lum > max) max = lum;
   }
 
+  // A near-uniform image (blank page, badly overexposed photo) has nothing to
+  // stretch. Pushing on regardless divides by a range clamped to 1, which
+  // amplifies trivial per-channel differences into a violent colour cast —
+  // an off-white (246, 245, 240) comes out as pure yellow (255, 255, 0).
+  const MIN_USEFUL_RANGE = 8;
+  if (max - min < MIN_USEFUL_RANGE) {
+    return canvas;
+  }
+
   // Leave a small headroom (2%) on each end to avoid blown highlights / crushed
   // blacks while still stretching most of the dynamic range.
   const headroom = Math.round((max - min) * 0.02);
@@ -789,10 +857,17 @@ export async function preprocessDocumentImage(
 ): Promise<ProcessedImageResult> {
   const sourceCanvas = await drawBlobToCanvas(capturedBlob);
   const rawDataUrl = sourceCanvas.toDataURL("image/jpeg", 0.95);
-  const { canvas: corrected, normalizedQuad: quadNormalized } = perspectiveCorrect(
-    sourceCanvas,
-    options?.quadHintNormalized
-  );
+  const { canvas: corrected, normalizedQuad: quadNormalized } = options?.skipPerspective
+    ? {
+        canvas: sourceCanvas,
+        normalizedQuad: [
+          { x: 0, y: 0 },
+          { x: 1, y: 0 },
+          { x: 1, y: 1 },
+          { x: 0, y: 1 }
+        ] as DocumentQuad
+      }
+    : perspectiveCorrect(sourceCanvas, options?.quadHintNormalized);
   const enhanced = enhanceContrastBrightness(corrected);
   const sharpened = unsharpMask(enhanced);
   const processedDataUrl = sharpened.toDataURL("image/jpeg", 0.97);

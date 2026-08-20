@@ -42,13 +42,17 @@ function parseCdlClass(raw: unknown): CdlClass {
   return letter && VALID_CDL_CLASSES.includes(letter) ? letter : "Unknown";
 }
 
+/** Thrown when the server cannot extract at all, as opposed to reading nothing. */
+class CdlExtractionUnavailable extends Error {}
+
 async function extractCdlData(imageDataUrl: string): Promise<ExtractedCdlData> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return {
-      confidence: 0,
-      notes: "OPENAI_API_KEY not configured."
-    };
+    // Same reasoning as the document route: a misconfigured server must not
+    // masquerade as an unreadable licence.
+    throw new CdlExtractionUnavailable(
+      "CDL extraction is not configured on this server (OPENAI_API_KEY is missing)."
+    );
   }
 
   const messages: OpenAiMessage[] = [
@@ -136,6 +140,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ extracted, validation });
   } catch (error) {
     const message = error instanceof Error ? error.message : "CDL extraction failed.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = error instanceof CdlExtractionUnavailable ? 503 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }
